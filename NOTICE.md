@@ -6,3 +6,11 @@ made independently installable, and stripped of production evidence and local
 experiment history for this repository.
 
 HBServe retains the original HBFSim copyright notice in `LICENSE`.
+
+The unified fixed-window frontend and shared client incorporate HBFSim commit
+`70c3fd5` (serving/window frontend unification). This standalone port preserves
+HBServe's package name, public model schema, and external-simulator interface.
+The 70B descriptor preserves the original per-output-channel W8 scale and
+embedding storage assumptions through the public model ledger. Paper-specific
+analysis runners, production evidence, and local experiment history are not
+included.

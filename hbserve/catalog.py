@@ -126,6 +126,9 @@ def model_from_ledger(
                     expert_weight_bytes=(aligned(components["expert_stride_bytes"]),)
                     * routed,
                     top_k=int(moe["activated_routed_experts_per_token"]),
+                    pre_routing_flops_per_token=int(
+                        compute["pre_routing_flops_per_token_by_layer"][layer]
+                    ),
                     kv_bytes_per_token=int(
                         components["kv_bytes_per_token_per_layer"]
                     ),

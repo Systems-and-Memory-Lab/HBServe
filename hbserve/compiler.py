@@ -44,6 +44,10 @@ class HBServeCompiler:
       provider; it depends on ``memory(L)`` and ``compute(L - 1)``.
     * KV writes of the layer's newly processed tokens depend on ``compute(L)``.
 
+    MoE splits compute into attention/router and FFN phases. Only known
+    weights may prefetch across layers; selected experts wait for this
+    layer's routing phase, even when a router trace was supplied offline.
+
     The tail (final norm, LM head when any request emits, tail compute) follows
     the last layer's compute, and ``batch/complete`` joins the tail with every
     KV write.
@@ -359,6 +363,22 @@ class HBServeCompiler:
                         labels={"layer": layer_id},
                     )
                 )
+            routing = None
+            routing_ns = 0.0
+            if layer.is_moe:
+                if not timing.routing_ns and timing.layer_ns[layer_id] != 0.0:
+                    raise HBServeError(
+                        "MoE compute timing requires an explicit routing phase"
+                    )
+                routing_ns = timing.routing_ns[layer_id] if timing.routing_ns else 0.0
+                routing = barrier(
+                    role=f"layer/{layer_id}/routing_ready",
+                    dependencies=(
+                        *memory_ops,
+                        compute_barriers[-1] if compute_barriers else embedded,
+                    ),
+                    duration_ns=routing_ns,
+                )
             if layer.shared_expert_weight_bytes:
                 memory_ops.append(
                     memory(
@@ -397,7 +417,7 @@ class HBServeCompiler:
                             offset=0,
                             byte_count=layer.expert_weight_bytes[expert_id],
                             op="R",
-                            dependencies=(memory_root,),
+                            dependencies=(routing,),
                             labels={
                                 "layer": layer_id,
                                 "expert": expert_id,
@@ -418,7 +438,7 @@ class HBServeCompiler:
             compute = barrier(
                 role=f"layer/{layer_id}/compute",
                 dependencies=compute_dependencies,
-                duration_ns=timing.layer_ns[layer_id],
+                duration_ns=timing.layer_ns[layer_id] - routing_ns,
             )
             compute_barriers.append(compute)
             for batch_slice, request in rows:

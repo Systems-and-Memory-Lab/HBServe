@@ -124,6 +124,7 @@ def _moe(model_id: str = "moe") -> ModelSpec:
                 top_k=2,
                 kv_bytes_per_token=4,
                 flops_per_token=384,
+                pre_routing_flops_per_token=80,
                 attention_flops_per_context_token=8,
             ),
         ),
@@ -283,7 +284,7 @@ def _engine(
 class ContractAndCompilerTests(unittest.TestCase):
     def test_execution_and_client_do_not_depend_on_frontier(self) -> None:
         for package in (ROOT / "hbserve", ROOT / "hbfsim_client"):
-            for source in package.glob("*.py"):
+            for source in package.rglob("*.py"):
                 self.assertNotIn(
                     "workloads.frontier",
                     source.read_text(encoding="utf-8"),
@@ -561,6 +562,81 @@ class ContractAndCompilerTests(unittest.TestCase):
             4,
         )
 
+    def test_selected_experts_wait_for_their_own_routing_phase(self) -> None:
+        model = _moe()
+        model = replace(model, layers=model.layers * 3)
+        request = RequestSpec("r0", 0.0, model.model_id, 2, 1)
+        trace = _trace(request)
+        router = RouterTrace(
+            provenance=TraceProvenance(kind="ci_fixture", source="causal router fixture"),
+            decisions=tuple(
+                RouterDecision("r0", token, layer, (0, 1))
+                for token in range(2) for layer in range(3)
+            ),
+        )
+        schedule = ScheduledBatch(
+            batch_id=0, model_id=model.model_id,
+            slices=(_slice("r0", 0, 2, phase="prefill", emits=True),),
+            not_before_ns=0.0,
+        )
+        providers = (
+            MemoryOnlyTimingProvider(),
+            LinearTimingProvider(100, 10, 0, 0, moe_routing_fraction=0.25),
+            RooflineTimingProvider(peak_tflops=1.0, efficiency=0.5),
+        )
+        for provider in providers:
+            for depth in (0, 1, 3):
+                with self.subTest(timing=provider.timing_model, prefetch_depth=depth):
+                    batch = HBServeCompiler(
+                        models={model.model_id: model}, request_trace=trace,
+                        router=router, timing=provider, prefetch_depth=depth,
+                    ).compile(schedule)
+                    by_id = {operation.id: operation for operation in batch.operations}
+                    by_role = {operation.role: operation for operation in batch.operations}
+
+                    def ancestors(identifier: str) -> set[str]:
+                        pending = list(by_id[identifier].dependencies)
+                        found: set[str] = set()
+                        while pending:
+                            dependency = pending.pop()
+                            if dependency not in found:
+                                found.add(dependency)
+                                pending.extend(by_id[dependency].dependencies)
+                        return found
+
+                    timing = provider.timing_for(model=model, batch=schedule)
+                    for layer in range(3):
+                        routing = by_role[f"layer/{layer}/routing_ready"]
+                        compute = by_role[f"layer/{layer}/compute"]
+                        self.assertAlmostEqual(
+                            routing.duration_ns + compute.duration_ns,
+                            timing.layer_ns[layer],
+                        )
+                        if provider.includes_compute:
+                            self.assertGreater(routing.duration_ns, 0.0)
+                        ready_dependencies = ancestors(routing.id)
+                        if layer:
+                            self.assertIn(by_role[f"layer/{layer - 1}/compute"].id,
+                                          ready_dependencies)
+                        for operation in batch.memory_operations:
+                            if batch.audit[operation.id].get("layer") != layer:
+                                continue
+                            if operation.role in {"attention/weights", "moe/router_weights"}:
+                                self.assertIn(operation.id, ready_dependencies)
+                            if operation.role == "moe/routed_expert_weights":
+                                self.assertEqual(operation.dependencies, (routing.id,))
+                    if provider.timing_model == "roofline":
+                        self.assertEqual(timing.routing_ns, ((2 * 80 + 3 * 8) / 500,) * 3)
+
+        with self.assertRaisesRegex(HBServeError, "moe_routing_fraction"):
+            LinearTimingProvider(1, 1, 0, 0).timing_for(model=model, batch=schedule)
+        missing_ledger = replace(
+            model, layers=tuple(replace(layer, pre_routing_flops_per_token=None)
+                                for layer in model.layers),
+        )
+        with self.assertRaisesRegex(HBServeError, "pre_routing_flops_per_token"):
+            providers[-1].timing_for(model=missing_ledger, batch=schedule)
+
     def test_router_trace_must_cover_every_processed_token(self) -> None:
         model = _moe()
         request = RequestSpec("r0", 0.0, model.model_id, 2, 1)
@@ -611,6 +687,8 @@ class ContractAndCompilerTests(unittest.TestCase):
 
 
 class PlacementTests(unittest.TestCase):
+    simulator: Path | None = None
+
     def test_block_table_grows_incrementally_per_iteration(self) -> None:
         model = _dense()
         request = RequestSpec("r0", 0.0, model.model_id, 5, 3)
@@ -1059,11 +1137,13 @@ class PlacementTests(unittest.TestCase):
         self.assertEqual(plain._hbm_stripe_pieces(0, 208), [(0, 208)])
 
     def test_placement_presets_derive_capacities_from_the_system_config(self) -> None:
+        if self.simulator is None:
+            self.skipTest("no simulator supplied")
         from hbfsim_client.simulation_session import ResolvedSystemConfig
 
         system = ResolvedSystemConfig.load(
             [ROOT / "configs/4hbm-4hbf-miniquick.cfg"]
-        )
+        ).resolve(self.simulator)
         model = _dense()
         spec = derive_placement(
             system=system, models={model.model_id: model}, preset="weights-hbf-kv-hbm"
@@ -1071,7 +1151,7 @@ class PlacementTests(unittest.TestCase):
         self.assertEqual(spec.hbm_capacity_bytes, system.hbm_capacity_bytes)
         self.assertEqual(spec.model_weight_tiers, {model.model_id: "hbf"})
         self.assertIsNone(spec.kv_placement.cold)
-        self.assertLessEqual(spec.hbf_capacity_bytes, system.hbf_geometry.capacity_bytes)
+        self.assertEqual(spec.hbf_capacity_bytes, system.logical_hbf_capacity_bytes)
         self.assertEqual(spec.hbf_capacity_bytes % 4096, 0)
         cold = derive_placement(
             system=system,
@@ -1479,5 +1559,6 @@ if __name__ == "__main__":
     PhysicalIntegrationTests.simulator = (
         None if args.simulator is None else args.simulator.resolve()
     )
+    PlacementTests.simulator = PhysicalIntegrationTests.simulator
     program = unittest.main(argv=[sys.argv[0], *remaining], exit=False)
     raise SystemExit(0 if program.result.wasSuccessful() else 1)

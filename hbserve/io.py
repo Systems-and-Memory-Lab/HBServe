@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import math
 import os
@@ -392,7 +393,7 @@ def timing_from_dict(
                 "ns_per_token_per_layer",
                 "tail_fixed_ns",
                 "tail_ns_per_output_request",
-            },
+            } | ({"moe_routing_fraction"} if "moe_routing_fraction" in timing else set()),
             "linear timing",
         )
         return (
@@ -408,6 +409,10 @@ def timing_from_dict(
                 tail_ns_per_output_request=_number(
                     timing["tail_ns_per_output_request"],
                     "linear tail_ns_per_output_request",
+                ),
+                moe_routing_fraction=(
+                    _number(timing["moe_routing_fraction"], "moe_routing_fraction")
+                    if "moe_routing_fraction" in timing else None
                 ),
             ),
             prefetch_depth,
@@ -520,6 +525,13 @@ def synthetic_request_config_from_dict(
             value["first_arrival_policy"], "first_arrival_policy"
         ),
     )
+
+
+def create_run_directory(root: Path) -> Path:
+    root = root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Path(tempfile.mkdtemp(prefix=f"{stamp}-", dir=root))
 
 
 def write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:

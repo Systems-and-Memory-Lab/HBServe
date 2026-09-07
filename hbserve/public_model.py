@@ -185,6 +185,18 @@ def derive_public_model_ledger(
         minimum=1,
     )
     scale_bytes = _integer(precision.get("scale_bytes"), "public scale bytes")
+    quantization_scheme = precision.get("quantization_scheme")
+    if quantization_scheme not in {
+        "none", "blockwise_128x128", "symmetric_per_output_channel"
+    }:
+        _fail("public quantization scheme is unsupported")
+    if (quantization_scheme == "none") != (scale_bytes == 0):
+        _fail("public scale bytes must agree with the quantization scheme")
+    if _integer(precision.get("zero_point_bytes", 0), "public zero-point bytes"):
+        _fail("public zero-point storage is unsupported")
+    embedding_storage = precision.get("embedding_storage", "non_matrix")
+    if embedding_storage not in {"matrix", "non_matrix"}:
+        _fail("public embedding storage must be matrix or non_matrix")
     kv_bytes = _integer(
         precision.get("kv_bytes"), "public KV bytes", minimum=1
     )
@@ -207,13 +219,15 @@ def derive_public_model_ledger(
     ):
         _fail("public block-table entry bytes must match the shared planner")
 
-    def matrix(parameters: int) -> int:
-        """Quantized matrix storage: payload plus block-wise scales."""
+    def matrix(parameters: int, output_channels: int) -> int:
+        """Matrix storage under the descriptor's declared scale geometry."""
 
-        if parameters % QUANT_BLOCK_ELEMENTS:
-            scales = parameters // QUANT_BLOCK_ELEMENTS + 1
+        if quantization_scheme == "none":
+            scales = 0
+        elif quantization_scheme == "symmetric_per_output_channel":
+            scales = output_channels
         else:
-            scales = parameters // QUANT_BLOCK_ELEMENTS
+            scales = (parameters + QUANT_BLOCK_ELEMENTS - 1) // QUANT_BLOCK_ELEMENTS
         return parameters * matrix_weight_bytes + scales * scale_bytes
 
     # --- Attention geometry ------------------------------------------------
@@ -238,6 +252,7 @@ def derive_public_model_ledger(
             + 2 * hidden * kv_heads * head_dim
             + heads * head_dim * hidden
         )
+        attention_output_channels = heads * head_dim + 2 * kv_heads * head_dim + hidden
         attention_norm_parameters = (
             2 * hidden + (2 * head_dim if qk_head_norms else 0)
         )
@@ -272,6 +287,13 @@ def derive_public_model_ledger(
             + kv_lora_rank * heads * (qk_nope_head_dim + v_head_dim)
             + heads * v_head_dim * hidden
         )
+        attention_output_channels = (
+            q_lora_rank
+            + heads * (qk_nope_head_dim + qk_rope_head_dim)
+            + kv_lora_rank + qk_rope_head_dim
+            + heads * (qk_nope_head_dim + v_head_dim)
+            + hidden
+        )
         # Input/post norms plus the two MLA low-rank norms.
         attention_norm_parameters = 2 * hidden + q_lora_rank + kv_lora_rank
         kv_bytes_per_token_per_layer = (
@@ -292,15 +314,19 @@ def derive_public_model_ledger(
     ):
         _fail("MoE FFN geometry must match the declared architecture kind")
 
-    embedding_bytes = vocab * hidden * non_matrix_bytes
+    embedding_bytes = (
+        matrix(vocab * hidden, vocab)
+        if embedding_storage == "matrix"
+        else vocab * hidden * non_matrix_bytes
+    )
     final_norm_bytes = hidden * non_matrix_bytes
-    output_head_bytes = matrix(vocab * hidden)
+    output_head_bytes = matrix(vocab * hidden, vocab)
     output_head_parameters = vocab * hidden
 
     layer_bytes: list[int] = []
     dense_sublayer_bytes_by_layer: list[int] = []
     moe_block: dict[str, Any] | None = None
-    attention_bytes = matrix(attention_parameters)
+    attention_bytes = matrix(attention_parameters, attention_output_channels)
     norm_bytes = attention_norm_parameters * non_matrix_bytes
 
     if moe_config is None:
@@ -310,7 +336,7 @@ def derive_public_model_ledger(
             minimum=1,
         )
         dense_ffn_parameters = 3 * hidden * dense_intermediate
-        dense_ffn_bytes = matrix(dense_ffn_parameters)
+        dense_ffn_bytes = matrix(dense_ffn_parameters, 2 * dense_intermediate + hidden)
         uniform_layer = _align_up(
             attention_bytes + norm_bytes + dense_ffn_bytes, alignment
         )
@@ -381,13 +407,13 @@ def derive_public_model_ledger(
                 minimum=1,
             )
             dense_ffn_parameters = 3 * hidden * dense_intermediate
-            dense_ffn_bytes = matrix(dense_ffn_parameters)
+            dense_ffn_bytes = matrix(dense_ffn_parameters, 2 * dense_intermediate + hidden)
         expert_parameters = 3 * hidden * expert_intermediate
         router_parameters = hidden * routed_experts
-        expert_payload_bytes = matrix(expert_parameters)
+        expert_payload_bytes = matrix(expert_parameters, 2 * expert_intermediate + hidden)
         expert_stride_bytes = _align_up(expert_payload_bytes, alignment)
         router_bytes = (
-            matrix(router_parameters) + routed_experts * non_matrix_bytes
+            matrix(router_parameters, routed_experts) + routed_experts * non_matrix_bytes
         )
         shared_expert_bytes = shared_experts * expert_payload_bytes
         linear_flops_by_layer = []
@@ -533,6 +559,10 @@ def derive_public_model_ledger(
         # token per context token, and 2 x vocab x hidden for the LM head.
         "compute": {
             "linear_flops_per_token_by_layer": linear_flops_by_layer,
+            "pre_routing_flops_per_token_by_layer": [
+                0 if layer < first_moe_layer else 2 * (attention_parameters + router_parameters)
+                for layer in range(num_layers)
+            ],
             "attention_flops_per_token_per_context_token": (
                 attention_flops_per_context_token
             ),

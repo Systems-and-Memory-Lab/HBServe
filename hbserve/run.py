@@ -1,33 +1,31 @@
 #!/usr/bin/env python3
-"""One-command HBServe runs on a physical HBFSim session.
+"""One workload frontend with explicit closed-loop and fixed-window inputs.
 
 ``python -m hbserve run`` takes a model (catalog descriptor or
 ``hbserve.model`` JSON), a system config with optional overlays, a request
 source (synthetic spec or request trace), and a placement preset or JSON,
 derives the placement capacities from the system config, runs the closed
 loop, writes every input and the receipted result into a fresh timestamped
-directory, and prints a short headline.
+directory, and prints a short headline. Alternatively, ``--experiment``
+selects a matched fixed memory window, without request scheduling or compute.
 """
 
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import hashlib
-import os
 from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from hbfsim_client.simulation_session import (  # noqa: E402
     ResolvedSystemConfig,
     SimulationSessionError,
 )
+from hbfsim_client.provenance import add_allow_dirty_argument
 from hbserve.catalog import load_model_any  # noqa: E402
 from hbserve.compiler import HBServeCompiler  # noqa: E402
 from hbserve.contracts import (  # noqa: E402
@@ -44,6 +42,7 @@ from hbserve.io import (  # noqa: E402
     REQUEST_TRACE_SCHEMA,
     RUN_CONFIG_SCHEMA,
     SYNTHETIC_REQUEST_SCHEMA,
+    create_run_directory,
     load_json_object,
     load_router,
     placement_from_dict,
@@ -77,7 +76,6 @@ PLACEMENT_PRESETS: dict[str, dict[str, Any]] = {
     "weights-hbf-kv-hbf-cold": {"weights": "hbf", "kv_cold": "hbf"},
 }
 HBM_RUNTIME_RESERVE_FRACTION = 0.05
-HBF_LOGICAL_FRACTION = (7, 8)  # 12.5 % over-provisioning for GC
 
 
 def _artifact(path: Path) -> dict[str, Any]:
@@ -126,10 +124,9 @@ def derive_placement(
         ) from error
     geometry = system.hbf_geometry
     hbm_capacity = system.hbm_capacity_bytes
-    hbf_capacity = _align_down(
-        geometry.capacity_bytes * HBF_LOGICAL_FRACTION[0] // HBF_LOGICAL_FRACTION[1],
-        geometry.page_size_bytes,
-    )
+    if system.logical_hbf_capacity_bytes is None:
+        raise HBServeError("placement requires geometry resolved by the simulator")
+    hbf_capacity = system.logical_hbf_capacity_bytes
     external_capacity = 0
     external_page = 4096
     if system.values.get("external-backing-kind") is not None:
@@ -417,6 +414,7 @@ def run_experiment(
         )
     experiment = {
         "schema": EXPERIMENT_SCHEMA,
+        "execution_mode": "closed_loop",
         "result": "pass",
         "inputs": dict(input_artifacts),
         "hbserve": hbserve_result,
@@ -426,70 +424,80 @@ def run_experiment(
     return experiment
 
 
-def _unique_output_directory(root: Path, seed: str) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    token = hashlib.sha256(f"{seed}\0{os.getpid()}\0{stamp}".encode()).hexdigest()[:8]
-    directory = root / f"{stamp}-{token}"
-    directory.mkdir(parents=True, exist_ok=False)
-    return directory
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m hbserve run",
+        prog="hbserve run",
         description=(
-            "Run an LLM serving workload through one persistent HBFSim session"
+            "Run closed-loop requests (--requests) or a fixed memory window "
+            "(--experiment) through HBFSim. Scale is selected by the input "
+            "configs, not by a different generator."
         ),
     )
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--requests",
+        type=Path,
+        help="closed loop: hbserve.synthetic_requests or hbserve.request_trace JSON",
+    )
+    source.add_argument(
+        "--experiment",
+        type=Path,
+        help="fixed window: explicit experiment JSON (miniquick or full scale); "
+        "no compute, request admission feedback, or TTFT/TPOT",
+    )
+    serving = parser.add_argument_group("closed-loop requests only")
+    serving.add_argument(
         "--model",
         type=Path,
         action="append",
-        required=True,
-        help="hbserve.public_model descriptor or hbserve.model JSON; "
-        "repeat for multi-model serving",
+        help="hbserve.public_model descriptor or "
+        "hbserve.model JSON; required with --requests; repeat for multi-model serving",
     )
-    parser.add_argument("--system", type=Path, required=True, help="system config")
-    parser.add_argument(
+    serving.add_argument(
+        "--system", type=Path, help="system config; required with --requests"
+    )
+    serving.add_argument(
         "--overlay",
         type=Path,
         action="append",
-        default=[],
         help="overlay config applied after --system (repeatable)",
     )
-    parser.add_argument(
-        "--requests",
-        type=Path,
-        required=True,
-        help="hbserve.synthetic_requests spec or hbserve.request_trace JSON",
-    )
-    parser.add_argument("--router", type=Path, help="MoE router trace or synthetic router")
-    parser.add_argument(
+    serving.add_argument("--router", type=Path, help="MoE router trace or synthetic router")
+    serving.add_argument(
         "--placement",
-        required=True,
-        help="preset (" + ", ".join(sorted(PLACEMENT_PRESETS)) + ") or placement JSON",
+        help="preset (" + ", ".join(sorted(PLACEMENT_PRESETS)) + ") or placement JSON; "
+        "required with --requests",
     )
-    parser.add_argument(
+    serving.add_argument(
         "--run-config",
         type=Path,
         help="hbserve.run_config JSON; default: token-budgeted mixed iterations "
         "with roofline timing",
     )
-    parser.add_argument(
+    serving.add_argument(
         "--timing",
         choices=("roofline", "memory_only"),
-        default="roofline",
-        help="default run-config timing model (ignored with --run-config)",
+        help="default: roofline; cannot combine timing knobs with --run-config",
     )
-    parser.add_argument("--peak-tflops", type=float, default=DEFAULT_PEAK_TFLOPS)
-    parser.add_argument("--efficiency", type=float, default=DEFAULT_EFFICIENCY)
-    parser.add_argument("--prefetch-depth", type=int, default=1)
-    parser.add_argument(
-        "--simulator",
-        type=Path,
-        required=True,
-        help="path to a compatible HBFSim executable",
+    serving.add_argument(
+        "--peak-tflops", type=float, help=f"default: {DEFAULT_PEAK_TFLOPS}"
     )
+    serving.add_argument(
+        "--efficiency", type=float, help=f"default: {DEFAULT_EFFICIENCY}"
+    )
+    serving.add_argument("--prefetch-depth", type=int, help="default: 1")
+    window = parser.add_argument_group("fixed-window experiments only")
+    window.add_argument(
+        "--topologies",
+        help="comma-separated topology IDs to execute; default: all declared rows",
+    )
+    window.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="generate and validate the entire window/matrix without a simulator",
+    )
+    add_allow_dirty_argument(window)
+    parser.add_argument("--simulator", type=Path, help="path to a compatible external HBFSim executable")
     parser.add_argument("--out", type=Path, required=True, help="output root directory")
     return parser
 
@@ -497,8 +505,58 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    timing_defaults = {
+        "timing": "roofline",
+        "peak_tflops": DEFAULT_PEAK_TFLOPS,
+        "efficiency": DEFAULT_EFFICIENCY,
+        "prefetch_depth": 1,
+    }
+    serving_options = (
+        "model",
+        "system",
+        "overlay",
+        "router",
+        "placement",
+        "run_config",
+        *timing_defaults,
+    )
+    if args.experiment is not None:
+        invalid = [name for name in serving_options if getattr(args, name) is not None]
+        if invalid:
+            parser.error(
+                "--experiment cannot use closed-loop options: "
+                + ", ".join("--" + name.replace("_", "-") for name in invalid)
+            )
+        if args.preflight_only and args.topologies is not None:
+            parser.error(
+                "--preflight-only validates all rows; --topologies is execution-only"
+            )
+        from hbserve.windows.run import run_window
+
+        if not args.preflight_only and args.simulator is None:
+            parser.error("--simulator is required for physical execution")
+        return run_window(args, parser)
+    if args.topologies is not None or args.preflight_only or args.allow_dirty:
+        parser.error(
+            "--topologies, --preflight-only, and --allow-dirty require --experiment"
+        )
+    missing = [
+        name for name in ("model", "system", "placement")
+        if getattr(args, name) is None
+    ]
+    if missing:
+        parser.error("--requests requires " + ", ".join("--" + name for name in missing))
+    if args.run_config is not None and any(
+        getattr(args, name) is not None for name in timing_defaults
+    ):
+        parser.error("--run-config cannot be combined with timing/prefetch overrides")
+    for name, value in timing_defaults.items():
+        if getattr(args, name) is None:
+            setattr(args, name, value)
+    if args.simulator is None:
+        parser.error("--simulator is required for physical execution")
     try:
-        system_paths = [args.system, *args.overlay]
+        system_paths = [args.system, *(args.overlay or [])]
         models = {}
         model_artifacts = []
         for path in args.model:
@@ -509,7 +567,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model_artifacts.append(_artifact(path))
         request_trace = load_requests_any(args.requests)
         router = None if args.router is None else load_router(args.router)
-        system = ResolvedSystemConfig.load(system_paths)
+        system = ResolvedSystemConfig.load(system_paths).resolve(args.simulator)
         placement_path: Path | None = None
         if args.placement in PLACEMENT_PRESETS:
             placement_spec = derive_placement(
@@ -565,9 +623,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else {"default": True, "sha256": canonical_sha256(run_config)}
             ),
         }
-        output_directory = _unique_output_directory(
-            args.out, canonical_sha256(input_artifacts)
-        )
+        output_directory = create_run_directory(args.out)
         for model in models.values():
             write_json_atomic(
                 output_directory / f"model-{model.model_id}.json", model.canonical()
@@ -600,7 +656,3 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     print("\n".join(lines))
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

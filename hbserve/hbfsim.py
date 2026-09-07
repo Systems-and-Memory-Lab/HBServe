@@ -35,7 +35,9 @@ class HbfSimExecutor:
     ) -> None:
         self.placement = placement
         try:
-            self.system_config = ResolvedSystemConfig.load(system_config_paths)
+            self.system_config = ResolvedSystemConfig.load(system_config_paths).resolve(
+                simulator_path, enable_hbf=placement.enable_hbf
+            )
         except SimulationSessionError as error:
             raise HBServeError(str(error)) from error
         geometry = self.system_config.hbf_geometry
@@ -50,9 +52,9 @@ class HbfSimExecutor:
             raise HBServeError(
                 "serving placement HBF geometry differs from the physical config"
             )
-        if placement.spec.hbf_capacity_bytes > geometry.capacity_bytes:
+        if placement.enable_hbf and placement.spec.hbf_capacity_bytes > self.system_config.logical_hbf_capacity_bytes:
             raise HBServeError(
-                "serving placement HBF capacity exceeds the physical raw geometry"
+                "serving placement HBF capacity exceeds the engine's logical capacity"
             )
         if (
             placement.enable_external

@@ -1,6 +1,6 @@
-"""HBServe: request-driven LLM serving workloads for HBFSim.
+"""HBServe: one workload frontend for closed-loop serving and fixed windows.
 
-One path: catalog descriptor -> request source -> token-budgeted mixed
+Request path: catalog descriptor -> request source -> token-budgeted mixed
 iterations with paged KV -> placement-independent object DAG -> object-class
 placement (weights by tier, hot KV in HBM, cold KV in HBF or external) ->
 persistent HBFSim session, with roofline compute by default.
@@ -9,6 +9,9 @@ The package deliberately separates request/model semantics from the mapped
 memory protocol.  ``HBServeCompiler`` creates placement-independent
 object accesses; ``HBServePlacement`` is the only layer allowed to turn those
 objects into HBM, HBF, or external-memory transactions.
+
+``hbserve.windows`` supplies matched, deterministic memory-only windows for
+controlled topology comparisons without request scheduling or compute timing.
 """
 
 from hbserve.compiler import HBServeCompiler
@@ -38,7 +41,7 @@ from hbserve.synthetic import (
     generate_requests,
 )
 
-__version__ = "0.1.0a1"
+__version__ = "0.1.0a2"
 
 __all__ = [
     "BatchSlice",

@@ -220,6 +220,7 @@ class LayerSpec:
     kv_bytes_per_token: int
     flops_per_token: int
     attention_flops_per_context_token: int
+    pre_routing_flops_per_token: int | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -235,6 +236,15 @@ class LayerSpec:
         ):
             _integer(value, f"layer {name}")
         _integer(self.kv_bytes_per_token, "layer kv_bytes_per_token", minimum=1)
+        if self.pre_routing_flops_per_token is not None:
+            _integer(self.pre_routing_flops_per_token, "layer pre_routing_flops_per_token")
+            if (
+                not self.is_moe
+                or self.pre_routing_flops_per_token > self.flops_per_token
+            ):
+                raise HBServeError(
+                    "pre-routing FLOPs require MoE and cannot exceed layer FLOPs"
+                )
         for index, value in enumerate(self.expert_weight_bytes):
             _integer(value, f"expert_weight_bytes[{index}]", minimum=1)
         if self.expert_weight_bytes:
@@ -302,6 +312,8 @@ class LayerSpec:
             "attention_flops_per_context_token": (
                 self.attention_flops_per_context_token
             ),
+            **({"pre_routing_flops_per_token": self.pre_routing_flops_per_token}
+               if self.pre_routing_flops_per_token is not None else {}),
         }
 
 
@@ -646,7 +658,12 @@ class ModelSpec:
                 raise HBServeError(
                     f"layers[{layer_index}] must be an object"
                 )
-            _exact_keys(raw_layer, LAYER_FIELDS, f"layers[{layer_index}]")
+            _exact_keys(
+                raw_layer,
+                LAYER_FIELDS | ({"pre_routing_flops_per_token"}
+                                if "pre_routing_flops_per_token" in raw_layer else set()),
+                f"layers[{layer_index}]",
+            )
             raw_experts = raw_layer.get("expert_weight_bytes")
             if not isinstance(raw_experts, list):
                 raise HBServeError(
@@ -693,6 +710,11 @@ class ModelSpec:
                 attention_flops_per_context_token=_integer(
                     raw_layer.get("attention_flops_per_context_token"),
                     f"layers[{layer_index}] attention_flops_per_context_token",
+                ),
+                pre_routing_flops_per_token=(
+                    _integer(raw_layer["pre_routing_flops_per_token"],
+                             f"layers[{layer_index}] pre_routing_flops_per_token")
+                    if "pre_routing_flops_per_token" in raw_layer else None
                 ),
             )
             layers.append(layer)
@@ -1160,17 +1182,24 @@ class SchedulerPolicy:
 
 @dataclass(frozen=True)
 class BatchTiming:
-    """Per-layer compute time (one barrier per layer) plus the tail."""
+    """Total per-layer compute, its pre-routing portion for MoE, and the tail."""
 
     layer_ns: tuple[float, ...]
     tail_ns: float
     timing_model: str
     evidence_state: str
+    routing_ns: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         for index, value in enumerate(self.layer_ns):
             _finite(value, f"layer_ns[{index}]")
         _finite(self.tail_ns, "tail_ns")
+        if self.routing_ns and len(self.routing_ns) != len(self.layer_ns):
+            raise HBServeError("routing timing must cover every layer")
+        for index, value in enumerate(self.routing_ns):
+            _finite(value, f"routing_ns[{index}]")
+            if value > self.layer_ns[index]:
+                raise HBServeError("routing timing cannot exceed total layer timing")
         if self.timing_model not in TIMING_MODELS:
             raise HBServeError(
                 f"unsupported timing model: {self.timing_model}"
@@ -1246,8 +1275,12 @@ class LinearTimingProvider:
     tail_ns_per_output_request: float
     timing_model: str = "linear"
     evidence_state: str = "modeled_sensitivity"
+    moe_routing_fraction: float | None = None
 
     def __post_init__(self) -> None:
+        if self.moe_routing_fraction is not None:
+            if _finite(self.moe_routing_fraction, "moe_routing_fraction") > 1.0:
+                raise HBServeError("moe_routing_fraction must be in [0, 1]")
         for name, value in (
             ("fixed_ns_per_layer", self.fixed_ns_per_layer),
             ("ns_per_token_per_layer", self.ns_per_token_per_layer),
@@ -1274,6 +1307,8 @@ class LinearTimingProvider:
             "ns_per_token_per_layer": self.ns_per_token_per_layer,
             "tail_fixed_ns": self.tail_fixed_ns,
             "tail_ns_per_output_request": self.tail_ns_per_output_request,
+            **({"moe_routing_fraction": self.moe_routing_fraction}
+               if self.moe_routing_fraction is not None else {}),
         }
 
     def timing_for(
@@ -1284,6 +1319,14 @@ class LinearTimingProvider:
     ) -> BatchTiming:
         tokens = batch.scheduled_tokens
         per_layer = self.fixed_ns_per_layer + self.ns_per_token_per_layer * tokens
+        if (
+            per_layer
+            and any(layer.is_moe for layer in model.layers)
+            and self.moe_routing_fraction is None
+        ):
+            raise HBServeError(
+                "linear MoE timing requires explicit moe_routing_fraction"
+            )
         output_requests = sum(item.emits_output for item in batch.slices)
         tail = (
             self.tail_fixed_ns
@@ -1293,6 +1336,11 @@ class LinearTimingProvider:
         )
         return BatchTiming(
             layer_ns=(per_layer,) * model.num_layers,
+            routing_ns=tuple(
+                per_layer * (self.moe_routing_fraction or 0.0)
+                if layer.is_moe else 0.0
+                for layer in model.layers
+            ),
             tail_ns=tail,
             timing_model=self.timing_model,
             evidence_state=self.evidence_state,
@@ -1365,6 +1413,23 @@ class RooflineTimingProvider:
         batch: ScheduledBatch,
     ) -> BatchTiming:
         rate = self.flops_per_ns
+        routing_ns: list[float] = []
+        for layer in model.layers:
+            if not layer.is_moe:
+                routing_ns.append(0.0)
+                continue
+            if layer.pre_routing_flops_per_token is None:
+                raise HBServeError(
+                    "roofline MoE timing requires pre_routing_flops_per_token"
+                )
+            routing_flops = sum(
+                item.token_count * layer.pre_routing_flops_per_token
+                + (item.token_count * item.context_tokens_before
+                   + item.token_count * (item.token_count + 1) // 2)
+                * layer.attention_flops_per_context_token
+                for item in batch.slices
+            )
+            routing_ns.append(routing_flops / rate)
         layer_ns = tuple(
             self.layer_flops(layer, batch) / rate for layer in model.layers
         )
@@ -1372,6 +1437,7 @@ class RooflineTimingProvider:
         tail = output_requests * model.lm_head_flops_per_token / rate
         return BatchTiming(
             layer_ns=layer_ns,
+            routing_ns=tuple(routing_ns),
             tail_ns=tail,
             timing_model=self.timing_model,
             evidence_state=self.evidence_state,

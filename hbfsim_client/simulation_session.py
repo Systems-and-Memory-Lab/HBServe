@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -55,6 +55,7 @@ SOURCE_PROVENANCE_FIELDS = {
     "git_commit",
     "git_dirty",
     "tree_hash",
+    "source_sha256",
     "provenance_source",
 }
 LATENCY_FIELDS = {
@@ -787,6 +788,58 @@ class ResolvedSystemConfig:
     paths: tuple[Path, ...]
     values: Mapping[str, str]
     artifacts: tuple[Mapping[str, Any], ...]
+    logical_hbf_capacity_bytes: int | None = None
+
+    def resolve(
+        self, simulator_path: Path, *, enable_hbf: bool = True
+    ) -> "ResolvedSystemConfig":
+        command = [
+            str(simulator_path.resolve()), "--describe-system", "--enable-hbf",
+            "true" if enable_hbf else "false",
+        ]
+        for path in self.paths:
+            command.extend(("--system-config", str(path)))
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, text=True, timeout=30
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise SimulationSessionError(f"cannot resolve HBFSim geometry: {error}") from error
+        if completed.returncode:
+            raise SimulationSessionError(
+                f"cannot resolve HBFSim geometry: {completed.stderr.strip()}"
+            )
+        try:
+            descriptor = json.loads(completed.stdout)
+        except (ValueError, TypeError) as error:
+            raise SimulationSessionError("invalid HBFSim resolved-system receipt") from error
+        if not isinstance(descriptor, dict) or descriptor.get("schema") != {
+            "name": "hbfsim.resolved_system", "version": 1,
+        }:
+            raise SimulationSessionError("unsupported HBFSim resolved-system receipt")
+        capacity = _nonnegative_integer(
+            descriptor.get("hbf_logical_capacity_bytes"), "resolved logical HBF capacity"
+        )
+        values = descriptor.get("values")
+        required_values = {
+            "hbm-capacity-bytes", "hbf-stacks", "hbf-channels",
+            "hbf-dies-per-channel", "hbf-planes-per-die", "hbf-blocks-per-plane",
+            "hbf-pages-per-block", "hbf-page-size", "hbf-mapping-entries-per-page",
+            "hbf-mapping-mode", "hbf-ctrl-dram-bytes",
+        }
+        if (
+            not isinstance(values, dict)
+            or set(values) != required_values
+            or not all(isinstance(value, str) for value in values.values())
+        ):
+            raise SimulationSessionError("invalid HBFSim resolved geometry values")
+        resolved = replace(
+            self, values={**self.values, **values},
+            logical_hbf_capacity_bytes=capacity,
+        )
+        if capacity > resolved.hbf_geometry.capacity_bytes:
+            raise SimulationSessionError("resolved logical HBF capacity exceeds raw capacity")
+        return resolved
 
     @classmethod
     def load(cls, paths: Sequence[Path]) -> "ResolvedSystemConfig":
@@ -1010,6 +1063,8 @@ class ResolvedSystemConfig:
 
     @property
     def hbf_ctrl_dram_bytes(self) -> int:
+        if self.logical_hbf_capacity_bytes is not None:
+            return self.integer("hbf-ctrl-dram-bytes", minimum=0)
         raw = self.values.get("hbf-ctrl-dram-bytes")
         denominator_raw = self.values.get(
             "hbf-ctrl-dram-capacity-denominator"
@@ -1166,8 +1221,7 @@ class ResolvedSystemConfig:
             blocks_per_plane=self.integer("hbf-blocks-per-plane"),
             pages_per_block=self.integer("hbf-pages-per-block"),
             page_size_bytes=self.integer("hbf-page-size"),
-            # HBFSim v0 deliberately fixes this controller contract.
-            mapping_entries_per_page=512,
+            mapping_entries_per_page=int(self.values.get("hbf-mapping-entries-per-page", "512")),
         )
 
 
@@ -1330,15 +1384,16 @@ class SimulationSession:
                 * published_blocks
                 * geometry.pages_per_block
             )
-            minimum_mapping_pages = hbf_dense_mapping_pages(
-                first_lpn, initial_pages, geometry
+            minimum_mapping_pages = (
+                0 if system_config.hbf_mapping_mode == "direct" else
+                hbf_dense_mapping_pages(first_lpn, initial_pages, geometry)
             )
             if (
                 static_pages
                 + published_pages
                 + initial_pages
                 + minimum_mapping_pages
-                >= total_pages
+                > total_pages
             ):
                 raise SimulationSessionError(
                     "initial HBF data, mapping, static, and published extents cannot fit "
@@ -1462,7 +1517,7 @@ class SimulationSession:
             )
             mapping_pages = (
                 hbf_dense_mapping_pages(first_lpn, initial_pages, geometry)
-                if enable_hbf
+                if enable_hbf and system_config.hbf_mapping_mode != "direct"
                 else 0
             )
             expected_initial_image = {
@@ -1542,8 +1597,11 @@ class SimulationSession:
                 or not isinstance(engine_source.get("git_commit"), str)
                 or not isinstance(engine_source.get("git_dirty"), bool)
                 or not isinstance(engine_source.get("tree_hash"), str)
-                or engine_source.get("provenance_source")
-                not in {"run-time", "build-time"}
+                or not isinstance(engine_source.get("source_sha256"), str)
+                or len(engine_source["source_sha256"]) != 64
+                or any(character not in "0123456789abcdef"
+                       for character in engine_source["source_sha256"])
+                or engine_source.get("provenance_source") != "build-time"
                 or isinstance(dependency_window, bool)
                 or not isinstance(dependency_window, int)
                 or dependency_window < 1

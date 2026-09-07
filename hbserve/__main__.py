@@ -11,7 +11,7 @@ from typing import Sequence
 USAGE = """usage: hbserve <command> [options]
 
 commands:
-  run       run a serving workload through one external HBFSim session
+  run       run closed-loop requests or matched fixed memory windows
   model     convert a catalog descriptor into hbserve.model JSON
   generate  generate a deterministic Poisson/lognormal request trace
   capabilities

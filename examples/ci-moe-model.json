@@ -30,6 +30,7 @@
       "top_k": 2,
       "kv_bytes_per_token": 4,
       "flops_per_token": 384,
+      "pre_routing_flops_per_token": 80,
       "attention_flops_per_context_token": 8
     }
   ],

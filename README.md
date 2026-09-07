@@ -6,6 +6,10 @@ batching iterations, paged-KV lifecycle events, and byte-exact memory
 transactions. A compatible HBFSim executable can then close the loop with
 physical memory completion times.
 
+The same `hbserve run` command also accepts fixed memory-window experiments.
+Miniquick and full-scale use the same generator, model ledger, and remappers;
+their model, population, and system profiles differ, not their implementation.
+
 HBServe is a workload simulator frontend, not an inference engine. Its primary
 goal is to make every realism claim inspectable: synthetic inputs stay labeled
 synthetic, source artifacts are hashed, model bytes are derived by explicit
@@ -22,6 +26,8 @@ formulas, and each result carries a machine-readable capability boundary.
 - Roofline, memory-only, or linear compute timing.
 - A persistent HBFSim session whose completion frontier schedules the next
   iteration.
+- Matched fixed-window topology comparisons: prefill growth, decode-only, and
+  source-anchored mixed windows, with no compute timing or request feedback.
 
 HBServe currently models one device and no collective/network timing. It does
 not claim kernel-level cache behavior or hardware-calibrated end-to-end latency
@@ -66,10 +72,24 @@ hbserve run \
   --out out/quickstart
 ```
 
-Every run creates a new timestamped directory. It records canonical inputs,
+Every closed-loop run creates a new unique timestamped directory. It records canonical inputs,
 SHA-256 identities, mapped-byte conservation, per-iteration schedules,
 per-request latency rows, physical completions, eligibility flags, and a short
 headline. Existing results are never overwritten.
+
+Generate a miniquick window and validate its topology matrix without a simulator:
+
+```bash
+hbserve run --experiment configs/windows/miniquick-serving.json \
+  --preflight-only --out out/window-check
+```
+
+For physical execution, replace `--preflight-only` with
+`--simulator /path/to/hbfsim --topologies all-hbm,4h4f`. Select
+`configs/windows/full-scale-serving.json` for the full-scale MoE population.
+Full-scale execution can be expensive; check the generated workload first.
+Use `--allow-dirty` for exploratory runs from a modified or non-Git installation.
+See [Fixed windows](docs/windows.md) for modes, profiles, and interpretation.
 
 ## Why the workload is credible
 
@@ -77,7 +97,7 @@ HBServe separates four questions that benchmarks often conflate:
 
 1. **Input realism:** request arrivals, prompt/output lengths, token IDs, and
    MoE routes are either source-qualified traces or explicitly synthetic.
-2. **Semantic realism:** the scheduler and paged-KV state machine operate on
+2. **Semantic realism:** in closed-loop mode, the scheduler and paged-KV state machine operate on
    individual requests and tokens rather than a fixed bandwidth loop.
 3. **Traffic realism:** model dimensions and precision produce an auditable
    per-object byte ledger; mapping must conserve those bytes exactly.
@@ -92,6 +112,7 @@ a serving profiler to cache-line address/arrival traces, and
 ## Repository layout
 
 - `hbserve/`: request semantics, scheduler, compiler, placement, and CLI.
+- `hbserve/windows/`: deterministic fixed-population windows and address remapping.
 - `hbfsim_client/`: the minimal persistent-session protocol used by the HBFSim
   backend.
 - `models/`: public, source-attributed architecture descriptors.
@@ -105,11 +126,14 @@ a serving profiler to cache-line address/arrival traces, and
 
 ```bash
 python3 -B tests/test_hbserve.py
+python3 -B tests/test_windows.py
 python3 -B tests/test_hbserve.py --simulator /path/to/HBFSim/build/hbfsim
+python3 -B tests/test_windows.py --simulator /path/to/HBFSim/build/hbfsim
 ```
 
-The first command is self-contained and skips physical integration tests. The
-second exercises the full persistent-session path.
+Without `--simulator`, both suites are self-contained and skip physical tests.
+With it, they exercise closed-loop serving and a tiny fixed-window execution;
+the tests do not execute the full miniquick or full-scale physical matrix.
 
 ## Maturity and license
 

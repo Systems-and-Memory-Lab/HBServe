@@ -1,0 +1,240 @@
+{
+  "schema": {
+    "name": "hbserve.fixed_window_experiment",
+    "version": 1
+  },
+  "experiment_id": "hbf-1tb-moe-serving-v1",
+  "purpose": "Full-scale default serving window: four DeepSeek-V3 contexts arrive sequentially and fill to 1,048,576 tokens by 64Ki-token chunks while every already-filled context decodes one token per iteration in the same forward pass (continuous batching, shared weight sweeps), then a four-step decode tail over the grown histories - the terabyte-scale twin of the miniquick serving window.",
+  "population": {
+    "model_descriptor": "../../models/deepseek-v3-fp8-kv-bf16.json",
+    "target_population_bytes": 1000000000000,
+    "runtime_overhead_bytes": 8589934592,
+    "construction": "largest_whole_kv_block_population_within_aligned_address_space_target",
+    "topology_independent": true
+  },
+  "workload": {
+    "kind": "fixed_prefill_decode_memory_window",
+    "kv_context_count": 4,
+    "prefill_contexts": 0,
+    "prefill_tokens_per_context": 0,
+    "decode_contexts": 4,
+    "decode_tokens_per_context": 1,
+    "random_decode_contexts": 0,
+    "random_read_chunk_blocks": 256,
+    "locality_seed": 20260827,
+    "compute_time": "not_modeled",
+    "initial_state": "model_weights_installed_and_kv_arena_empty;_arrivals_fill_while_filled_contexts_decode_each_iteration",
+    "execution_order": "per_arrival_per_chunk:_block_allocation_then_embedding_then_per_layer_full_weight_sweep_history_read_and_chunk_kv_write;_arrivals_complete_in_order;_then_output_head_then_four_decode_steps_then_final_drain",
+    "kv_storage_order": "layer_major",
+    "context_parallelism": "growth_contexts_are_sequential_arrivals;_decode_contexts_are_parallel;_random_kv_extents_of_a_context_issue_concurrently_and_its_append_waits_for_all_of_them",
+    "implementation": "address_ranges_only_without_payload_materialization",
+    "same_trace_for_every_topology": true,
+    "moe_routing": {
+      "distribution": "zipf_without_replacement_over_ranked_experts",
+      "zipf_exponent": 0.0,
+      "seed": 20260827,
+      "per_layer_rank_rotation": true,
+      "basis": "Synthetic sensitivity reference, not measured DeepSeek-V3 serving: uniform ranks with declared per-slot temporal reuse. Sweep skew and reuse or supply empirical rank weights; neither proves token-level or deployment-level fidelity.",
+      "step_expert_reuse_probability": 0.3
+    },
+    "window_shape": "prefill_growth",
+    "context_length_basis": "the same declared 1,048,576-token serving point as the steady-state family, reached inside the window from the model-loaded state; the sequential variant uses a coarser 64Ki-token chunk so the window stays tractable while 16 iterations per context still resolve the growth curve",
+    "decode_steps_per_window": 4,
+    "prefill_growth_contexts": 4,
+    "prefill_target_tokens": 1048576,
+    "prefill_chunk_tokens": 65536,
+    "prefill_growth_schedule": "sequential",
+    "prefill_growth_decode_while_filling": true
+  },
+  "physical_slots": {
+    "slot_count": 8,
+    "comparison_unit": "complete_topology",
+    "hbm_bytes_per_stack": 51539607552,
+    "hbf_raw_bytes_per_stack": 549755813888
+  },
+  "mapping": {
+    "hbf_topologies": "directly_gpu_addressable_fixed_slot_replacement",
+    "reference_hbf_l2p_mode": "bounded_cached_L2P_with_capacity_derived_controller_DRAM",
+    "controller_dram_budget": "one_over_1000_of_raw_HBF_capacity_per_stack_charged_to_directory_write_buffer_and_mapping_cache",
+    "reference_policy_scope": "held_fixed_across_the_matched_topology_matrix",
+    "decision_inputs": [
+      "address",
+      "bytes"
+    ],
+    "placement_granularity_bytes": 33554432,
+    "hbm_staging": false,
+    "d2d_migration": false,
+    "external_offload": {
+      "gpu_visible_tier": "HBM_only",
+      "backing_store": "complete_canonical_address_space",
+      "admission": "demand_fill",
+      "replacement": "address_only_LRU",
+      "migration_granularity_bytes": 33554432,
+      "transfer_chunk_bytes": 16777216,
+      "read_ahead_window_bytes": 4294967296,
+      "write_policy": "write_back",
+      "final_policy": "flush_dirty_HBM_to_backing"
+    }
+  },
+  "thermal": {
+    "model": "per_stack_lumped_RC_node_with_firmware_pacing_governor",
+    "scope": "core_HBF_device_property_defined_in_the_system_profiles",
+    "array_timings_never_rescaled": true,
+    "reference_start_state": "throttle_ceiling_steady_state_serving_excerpt",
+    "start_state_overlay": "../overlays/hbf/thermal-steady-state-start.cfg",
+    "boundary": "the_measured_window_is_an_excerpt_of_sustained_serving;_HBF_stacks_enter_at_their_governor_ceiling_and_pacing_holds_dissipated_power_at_the_sustainable_budget",
+    "sensitivity_axes": [
+      "hbf-thermal-read-energy-pj-per-bit",
+      "hbf-thermal-throttle-power-w"
+    ],
+    "boundary_temperature_semantics": "hbf-thermal-ambient-c_is_the_documented_coolant_supply_reference_(45_C_NVL72_class_warm_water);_hbf-thermal-neighbor-heat-c_adds_the_declared_package_cross_heating;_their_sum_is_the_stack_local_boundary_temperature_the_RC_node_decays_toward",
+    "reference_boundary_temperature_c": 45,
+    "boundary_temperature_axis": {
+      "mechanism": "hbf-thermal-neighbor-heat-c",
+      "points": [
+        {
+          "boundary_c": 45,
+          "neighbor_heat_c": 0,
+          "overlay": null,
+          "basis": "NVL72-class maximum liquid inlet / warm-water supply mapped to the RC boundary as a model assumption (coolant-loop envelope, not an HBF measurement)"
+        },
+        {
+          "boundary_c": 55,
+          "neighbor_heat_c": 10,
+          "overlay": "../overlays/hbf/thermal-boundary-55c.cfg",
+          "basis": "calibrated numerical bracket: sustains ~208 GB/s per stack, numerically bracketing the ~202 GB/s of arXiv 2608.11668 whose physical conditions (write-heavy KV, 80 C safe junction, ~54 W 3D-ICE projection) differ from this pure-read 6 pJ/bit parameterization"
+        },
+        {
+          "boundary_c": 65,
+          "neighbor_heat_c": 20,
+          "overlay": "../overlays/hbf/thermal-boundary-65c.cfg",
+          "basis": "NVL72-class maximum liquid return mapped to the RC boundary as a model assumption (coolant-loop envelope, not an HBF measurement)"
+        },
+        {
+          "boundary_c": 70,
+          "neighbor_heat_c": 25,
+          "overlay": "../overlays/hbf/thermal-boundary-70c.cfg",
+          "basis": "full-load GPU package neighborhood assumption; >=75 C fails closed by policy (the governor could never release) as a guard against silently permanent throttling, not as a physical operating limit: 75-80 C boundaries retain a positive pacing budget but would be permanently throttled"
+        }
+      ]
+    }
+  },
+  "topologies": [
+    {
+      "id": "all-hbm",
+      "label": "all-HBM capacity-relaxed timing upper bound",
+      "composition": "all-HBM",
+      "integration_mode": "all_hbm_upper_bound",
+      "active_hbm_stacks": 8,
+      "active_hbf_stacks": 0,
+      "system_configs": [
+        "../systems/eight-stack-baseline.cfg",
+        "../overlays/backing/fixed-footprint-all-hbm-capacity.cfg"
+      ],
+      "claim_boundary": "timing_upper_bound_not_a_physical_eight_stack_capacity_claim"
+    },
+    {
+      "id": "8h0f-dram",
+      "label": "8 HBM / 0 HBF with DRAM overflow",
+      "composition": "8H0F+DRAM",
+      "integration_mode": "hbm_fronted_external",
+      "external_kind": "host-dram",
+      "active_hbm_stacks": 8,
+      "active_hbf_stacks": 0,
+      "system_configs": [
+        "../systems/eight-stack-baseline.cfg",
+        "../overlays/backing/host-dram.cfg",
+        "../overlays/backing/calibrated/dana-a100-host-dram-timing.cfg",
+        "../overlays/backing/fixed-footprint-external-capacity.cfg"
+      ]
+    },
+    {
+      "id": "8h0f-ssd",
+      "label": "8 HBM / 0 HBF with SSD overflow",
+      "composition": "8H0F+SSD",
+      "integration_mode": "hbm_fronted_external",
+      "external_kind": "nvme-ssd",
+      "active_hbm_stacks": 8,
+      "active_hbf_stacks": 0,
+      "system_configs": [
+        "../systems/eight-stack-baseline.cfg",
+        "../overlays/backing/nvme-ssd.cfg",
+        "../overlays/backing/calibrated/dana-a100-nvme-ssd-timing.cfg",
+        "../overlays/backing/fixed-footprint-external-capacity.cfg"
+      ]
+    },
+    {
+      "id": "6h2f",
+      "label": "6 HBM / 2 HBF",
+      "composition": "6H2F",
+      "integration_mode": "direct_hbm_hbf",
+      "active_hbm_stacks": 6,
+      "active_hbf_stacks": 2,
+      "system_configs": [
+        "../systems/6hbm-2hbf.cfg",
+        "../overlays/hbf/cached-l2p-1-over-1000.cfg",
+        "../overlays/hbf/thermal-steady-state-start.cfg"
+      ]
+    },
+    {
+      "id": "4h4f",
+      "label": "4 HBM / 4 HBF",
+      "composition": "4H4F",
+      "integration_mode": "direct_hbm_hbf",
+      "active_hbm_stacks": 4,
+      "active_hbf_stacks": 4,
+      "system_configs": [
+        "../systems/4hbm-4hbf.cfg",
+        "../overlays/hbf/cached-l2p-1-over-1000.cfg",
+        "../overlays/hbf/thermal-steady-state-start.cfg"
+      ]
+    },
+    {
+      "id": "2h6f",
+      "label": "2 HBM / 6 HBF",
+      "composition": "2H6F",
+      "integration_mode": "direct_hbm_hbf",
+      "active_hbm_stacks": 2,
+      "active_hbf_stacks": 6,
+      "system_configs": [
+        "../systems/2hbm-6hbf.cfg",
+        "../overlays/hbf/cached-l2p-1-over-1000.cfg",
+        "../overlays/hbf/thermal-steady-state-start.cfg"
+      ]
+    },
+    {
+      "id": "0h8f",
+      "label": "0 HBM / 8 HBF",
+      "composition": "0H8F",
+      "integration_mode": "direct_hbm_hbf",
+      "active_hbm_stacks": 0,
+      "active_hbf_stacks": 8,
+      "system_configs": [
+        "../systems/eight-stack-baseline.cfg",
+        "../overlays/hbf/cached-l2p-1-over-1000.cfg",
+        "../overlays/hbf/thermal-steady-state-start.cfg"
+      ]
+    }
+  ],
+  "measurement": {
+    "primary_metric": "final_drain_time_ns",
+    "completion_boundary": "trace_start_through_all_trace_caused_work_and_final_drain",
+    "shared_reference_artifacts": [
+      "medium_read_write_bytes",
+      "medium_read_write_operations",
+      "medium_mean_transaction_latency_ns",
+      "medium_read_write_and_total_throughput_GBps",
+      "average_per_active_stack_traffic",
+      "effective_trace_throughput_GBps",
+      "auxiliary_actual_to_logical_media_traffic_ratio",
+      "object_class_by_medium_distribution",
+      "hbf_thermal_governor_telemetry"
+    ],
+    "object_classes": [
+      "model_weights",
+      "kv_cache",
+      "metadata"
+    ],
+    "separate_serving_or_episode_metric": false
+  }
+}

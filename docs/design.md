@@ -2,7 +2,8 @@
 
 Status: experimental; schema compatibility is not yet promised.
 
-HBServe has one serving path:
+HBServe has one workload CLI with two explicit execution modes. The closed-loop
+serving path is:
 
 ```text
 hbserve.public_model or hbserve.model
@@ -31,6 +32,11 @@ choose an address or memory tier. Placement may choose addresses and tiers,
 but it cannot alter canonical object bytes. This split is checked in every
 mapped-batch receipt.
 
+The fixed-window path is `experiment -> public model ledger -> fixed population
+-> logical address phases -> remapper -> external HBFSim`. It uses the same
+generator at every scale and holds demand fixed across topologies. It does not
+run the request scheduler or report serving latency. See [Fixed windows](windows.md).
+
 ## Contracts
 
 All JSON inputs have a `{name, version}` schema field and are parsed strictly.
@@ -46,12 +52,17 @@ and an explicit precision profile. `hbserve model` derives the canonical
 - attention, dense FFN, router, shared-expert, and routed-expert objects for
   every layer;
 - KV bytes per token per layer;
-- linear FLOPs per token, attention FLOPs per context token, and LM-head FLOPs.
+- linear FLOPs per token, pre-routing FLOPs, attention FLOPs per context token,
+  and LM-head FLOPs.
 
 Object alignment is explicit. Quantization scale overhead and embedding
 precision are never silently replaced by a parameter-count heuristic. Catalog
 descriptors in `models/` are memory-capacity and traffic evidence; they are not
 by themselves GPU-latency evidence.
+
+Precision supports unquantized matrices, blockwise 128x128 scales, and symmetric
+per-output-channel scales. Embeddings default to non-matrix precision; the 70B
+miniquick descriptor explicitly selects matrix precision including row scales.
 
 HBServe represents one memory domain. Tensor, pipeline, and expert parallelism
 must therefore use a descriptor for the local shard. Collective traffic and
@@ -99,7 +110,7 @@ For each scheduled slice the compiler emits:
 - row-addressed embedding reads;
 - per-layer attention/norm and dense or routed-expert weight reads;
 - KV block-table and KV data reads/writes;
-- one compute barrier per layer;
+- per-layer compute, split at routing availability for MoE;
 - final norm and LM-head reads for token emission.
 
 The compiler reads the union of experts selected by the current batch once per
@@ -112,7 +123,10 @@ Timing providers are named in the result:
 - `linear`: explicit fixed and per-token layer costs for tests or sensitivity.
 
 Prefetch depth controls how far later-layer memory can issue while current
-compute proceeds. No provider is described as hardware measurement.
+compute proceeds. Selected experts cannot issue before their own layer's
+attention/router reads and routing-ready compute finish. Roofline uses the
+pre-routing FLOP ledger; linear MoE timing requires an explicit routing fraction.
+No provider is described as hardware measurement.
 
 ### Placement and execution
 

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hbserve"
-version = "0.1.0a1"
-description = "Evidence-aware, request-driven LLM serving memory workload compiler"
+version = "0.1.0a2"
+description = "LLM serving and fixed-window memory workload frontend for HBFSim"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
