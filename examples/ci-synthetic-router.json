@@ -1,0 +1,10 @@
+{
+  "schema": {
+    "name": "hbserve.synthetic_router",
+    "version": 1
+  },
+  "seed": 11,
+  "hot_experts": 2,
+  "hot_mass": 0.9,
+  "alpha": 1.2
+}

@@ -1,0 +1,26 @@
+{
+  "schema": {
+    "name": "hbserve.placement",
+    "version": 2
+  },
+  "hbm_capacity_bytes": 2147483648,
+  "hbf_capacity_bytes": 2097152,
+  "external_capacity_bytes": 274877906944,
+  "hbm_runtime_reserve_bytes": 67108864,
+  "hbm_model_cache_bytes": 40960,
+  "model_weight_tiers": {
+    "dense-ci": "hbf",
+    "moe-ci": "external_cached_hbm"
+  },
+  "object_tier_overrides": {},
+  "model_load_chunk_bytes": 16777216,
+  "initial_cached_models": [],
+  "hbm_alignment_bytes": 4096,
+  "hbf_page_size_bytes": 4096,
+  "external_page_size_bytes": 4096,
+  "kv_block_tokens": 16,
+  "kv_placement": {
+    "hot": "hbm",
+    "cold": "external"
+  }
+}

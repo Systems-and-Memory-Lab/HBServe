@@ -1,0 +1,18 @@
+{
+  "schema": {
+    "name": "hbserve.synthetic_requests",
+    "version": 1
+  },
+  "request_count": 4,
+  "arrival_rate_per_second": 1000000.0,
+  "prompt_lognormal_mean_tokens": 2.0,
+  "prompt_lognormal_sigma": 0.1,
+  "output_lognormal_mean_tokens": 2.0,
+  "output_lognormal_sigma": 0.1,
+  "model_probabilities": {
+    "dense-ci": 0.5,
+    "moe-ci": 0.5
+  },
+  "seed": 7,
+  "first_arrival_policy": "zero"
+}

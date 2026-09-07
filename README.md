@@ -1,0 +1,117 @@
+# HBServe
+
+HBServe is an evidence-aware workload compiler for studying the memory side of
+LLM serving. It turns model descriptors and request streams into continuous-
+batching iterations, paged-KV lifecycle events, and byte-exact memory
+transactions. A compatible HBFSim executable can then close the loop with
+physical memory completion times.
+
+HBServe is a workload simulator frontend, not an inference engine. Its primary
+goal is to make every realism claim inspectable: synthetic inputs stay labeled
+synthetic, source artifacts are hashed, model bytes are derived by explicit
+formulas, and each result carries a machine-readable capability boundary.
+
+## What is modeled
+
+- Dense, MoE, and multi-model request streams.
+- Token-budgeted continuous batching with chunked prefill and decode.
+- Incremental 16-token paged KV allocation, migration, preemption, and
+  recomputation.
+- Object-exact weight, embedding, LM-head, block-table, and KV traffic.
+- HBM, HBF, and external-memory placement with byte-conservation receipts.
+- Roofline, memory-only, or linear compute timing.
+- A persistent HBFSim session whose completion frontier schedules the next
+  iteration.
+
+HBServe currently models one device and no collective/network timing. It does
+not claim kernel-level cache behavior or hardware-calibrated end-to-end latency
+unless those are supplied and validated by a future trace/calibration backend.
+Run `hbserve capabilities` to inspect the exact current boundary.
+
+## Install
+
+HBServe requires Python 3.10 or newer and has no runtime Python dependencies.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e .
+hbserve --version
+hbserve capabilities
+```
+
+## Quick start
+
+Model conversion and request generation work without HBFSim:
+
+```bash
+mkdir -p out
+hbserve model models/llama31-8b-w8-kv-bf16.json \
+  --output out/llama31-8b.json
+
+hbserve generate \
+  --config examples/quickstart-requests.json \
+  --output out/requests.json
+```
+
+Physical execution requires a separately built compatible `hbfsim` binary:
+
+```bash
+hbserve run \
+  --simulator /path/to/HBFSim/build/hbfsim \
+  --model models/llama31-8b-w8-kv-bf16.json \
+  --system configs/4hbm-4hbf-miniquick.cfg \
+  --requests examples/quickstart-requests.json \
+  --placement weights-hbf-kv-hbm \
+  --out out/quickstart
+```
+
+Every run creates a new timestamped directory. It records canonical inputs,
+SHA-256 identities, mapped-byte conservation, per-iteration schedules,
+per-request latency rows, physical completions, eligibility flags, and a short
+headline. Existing results are never overwritten.
+
+## Why the workload is credible
+
+HBServe separates four questions that benchmarks often conflate:
+
+1. **Input realism:** request arrivals, prompt/output lengths, token IDs, and
+   MoE routes are either source-qualified traces or explicitly synthetic.
+2. **Semantic realism:** the scheduler and paged-KV state machine operate on
+   individual requests and tokens rather than a fixed bandwidth loop.
+3. **Traffic realism:** model dimensions and precision produce an auditable
+   per-object byte ledger; mapping must conserve those bytes exactly.
+4. **Timing realism:** timing is named by backend. Roofline and simulation are
+   models, not measurements; hardware claims require calibration and holdout
+   validation.
+
+See [Realism and trace integration](docs/realism.md) for the concrete path from
+a serving profiler to cache-line address/arrival traces, and
+[Design](docs/design.md) for the current contracts.
+
+## Repository layout
+
+- `hbserve/`: request semantics, scheduler, compiler, placement, and CLI.
+- `hbfsim_client/`: the minimal persistent-session protocol used by the HBFSim
+  backend.
+- `models/`: public, source-attributed architecture descriptors.
+- `examples/`: deterministic synthetic fixtures and quick-start inputs.
+- `configs/`: exploratory simulator profiles; see
+  [Configuration](docs/configuration.md).
+- `tests/`: contract, scheduler, accounting, and optional physical integration
+  tests.
+
+## Test
+
+```bash
+python3 -B tests/test_hbserve.py
+python3 -B tests/test_hbserve.py --simulator /path/to/HBFSim/build/hbfsim
+```
+
+The first command is self-contained and skips physical integration tests. The
+second exercises the full persistent-session path.
+
+## Maturity and license
+
+HBServe is alpha software. Schemas are versioned, but compatibility is not yet
+promised. The project is available under the [MIT License](LICENSE).

@@ -1,0 +1,16 @@
+{
+  "schema": {
+    "name": "hbserve.run_config",
+    "version": 2
+  },
+  "scheduler": {
+    "max_batch_requests": 2,
+    "max_batch_tokens": 8,
+    "prefill_chunk_tokens": 4
+  },
+  "timing": {
+    "type": "memory_only",
+    "prefetch_depth": 1
+  },
+  "compute": null
+}

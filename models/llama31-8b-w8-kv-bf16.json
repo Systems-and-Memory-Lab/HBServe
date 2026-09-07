@@ -1,0 +1,67 @@
+{
+  "schema": {
+    "name": "hbserve.public_model",
+    "version": 1
+  },
+  "intended_use": {
+    "role": "model_catalog_small_dense_memory_descriptor",
+    "paper_claim_eligible_by_itself": false,
+    "reason": "Byte counts are derived from publicly documented architecture dimensions; the descriptor is not backed by a hybrid-residency replay audit and its claims must stay memory-storage-and-traffic scoped"
+  },
+  "model": {
+    "name": "llama31_8b",
+    "architecture": "dense_decoder_transformer",
+    "source": {
+      "model_repository": "https://huggingface.co/meta-llama/Llama-3.1-8B",
+      "public_reference": "arXiv:2407.21783 (The Llama 3 Herd of Models)",
+      "config_access": "public",
+      "dimension_transcription": "architecture dimensions transcribed from the public config.json: 32 layers, hidden 4096, gated MLP intermediate 14336, 32 attention heads over 8 GQA key/value heads of head_dim 128, vocabulary 128256, untied embeddings; the derived total must reproduce the published approximately 8.0B parameter figure from the dimensions alone"
+    }
+  },
+  "architecture": {
+    "num_layers": 32,
+    "hidden_size": 4096,
+    "vocab_size": 128256,
+    "num_attention_heads": 32,
+    "tie_word_embeddings": false,
+    "attention": {
+      "kind": "gqa",
+      "num_key_value_heads": 8,
+      "head_dim": 128,
+      "qk_head_norms": false
+    },
+    "ffn": {
+      "dense_intermediate_size": 14336
+    }
+  },
+  "precision": {
+    "profile_id": "w8-kv-bf16",
+    "matrix_weight_dtype": "int8",
+    "matrix_weight_bytes": 1,
+    "non_matrix_weight_dtype": "bfloat16",
+    "non_matrix_weight_bytes": 2,
+    "kv_dtype": "bfloat16",
+    "kv_bytes": 2,
+    "quantization_scheme": "blockwise_128x128",
+    "scale_dtype": "bfloat16",
+    "scale_bytes": 2,
+    "claim_scope": "memory_storage_and_traffic_only"
+  },
+  "traffic_model": {
+    "weight_reads": "once_per_batch_per_layer",
+    "attention_kv_reads": "gqa_context_once_per_request_per_layer",
+    "kv_writes": "scheduled_input_tokens_once_per_layer",
+    "output_head_reads": "once_per_batch_with_output_token",
+    "embedding_address_policy": "sha256_per_scheduled_token_surrogate_rows",
+    "block_table_entry_bytes": 4,
+    "scratch_read_bytes_per_token_per_layer": 0,
+    "scratch_write_bytes_per_token_per_layer": 0,
+    "scratch_status": "not_modeled_without_calibrated_kernel_offchip_trace"
+  },
+  "addressing": {
+    "object_alignment_bytes": 4096,
+    "kv_slot_identity": "canonical_logical_block_id",
+    "kv_slot_layout": "layer_major_token_major_gqa",
+    "kv_slot_layout_status": "canonical_object_mapping_not_backend_measured"
+  }
+}

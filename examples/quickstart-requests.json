@@ -1,0 +1,17 @@
+{
+  "schema": {
+    "name": "hbserve.synthetic_requests",
+    "version": 1
+  },
+  "request_count": 8,
+  "arrival_rate_per_second": 2000.0,
+  "prompt_lognormal_mean_tokens": 256.0,
+  "prompt_lognormal_sigma": 0.0,
+  "output_lognormal_mean_tokens": 32.0,
+  "output_lognormal_sigma": 0.0,
+  "model_probabilities": {
+    "llama31_8b": 1.0
+  },
+  "seed": 7,
+  "first_arrival_policy": "zero"
+}

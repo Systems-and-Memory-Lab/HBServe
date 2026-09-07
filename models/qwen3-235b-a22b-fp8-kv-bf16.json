@@ -1,0 +1,76 @@
+{
+  "schema": {
+    "name": "hbserve.public_model",
+    "version": 1
+  },
+  "intended_use": {
+    "role": "model_catalog_medium_moe_memory_descriptor",
+    "paper_claim_eligible_by_itself": false,
+    "reason": "Byte counts are derived from publicly documented architecture dimensions; the descriptor is not backed by a hybrid-residency replay audit and its claims must stay memory-storage-and-traffic scoped"
+  },
+  "model": {
+    "name": "qwen3_235b_a22b",
+    "architecture": "moe_decoder_transformer",
+    "source": {
+      "model_repository": "https://huggingface.co/Qwen/Qwen3-235B-A22B",
+      "public_reference": "arXiv:2505.09388 (Qwen3 Technical Report)",
+      "config_access": "public",
+      "dimension_transcription": "architecture dimensions transcribed from the public config.json: 94 layers, all MoE with 128 routed experts, top-8 activation, no shared expert, expert intermediate 1536, hidden 4096, 64 attention heads over 4 GQA key/value heads of head_dim 128 with per-head q/k norms, vocabulary 151936, untied embeddings; the derived totals must reproduce the published 235B total and approximately 22B activated parameters from the dimensions alone"
+    }
+  },
+  "architecture": {
+    "num_layers": 94,
+    "hidden_size": 4096,
+    "vocab_size": 151936,
+    "num_attention_heads": 64,
+    "tie_word_embeddings": false,
+    "attention": {
+      "kind": "gqa",
+      "num_key_value_heads": 4,
+      "head_dim": 128,
+      "qk_head_norms": true
+    },
+    "ffn": {
+      "moe": {
+        "first_moe_layer": 0,
+        "routed_experts_per_layer": 128,
+        "activated_routed_experts_per_token": 8,
+        "shared_experts_per_layer": 0,
+        "expert_intermediate_size": 1536,
+        "group_limited_routing_modeled": false,
+        "multi_token_prediction_module_modeled": false
+      }
+    }
+  },
+  "precision": {
+    "profile_id": "fp8-kv-bf16",
+    "matrix_weight_dtype": "float8_e4m3",
+    "matrix_weight_bytes": 1,
+    "non_matrix_weight_dtype": "bfloat16",
+    "non_matrix_weight_bytes": 2,
+    "kv_dtype": "bfloat16",
+    "kv_bytes": 2,
+    "quantization_scheme": "blockwise_128x128",
+    "scale_dtype": "bfloat16",
+    "scale_bytes": 2,
+    "claim_scope": "memory_storage_and_traffic_only"
+  },
+  "traffic_model": {
+    "weight_reads": "dense_sublayer_once_per_batch_per_layer_plus_each_batch_activated_routed_expert_once",
+    "attention_kv_reads": "gqa_context_once_per_request_per_layer",
+    "kv_writes": "scheduled_input_tokens_once_per_layer",
+    "output_head_reads": "once_per_batch_with_output_token",
+    "embedding_address_policy": "sha256_per_scheduled_token_surrogate_rows",
+    "block_table_entry_bytes": 4,
+    "expert_read_extent": "4KiB_aligned_expert_stride_including_alignment_padding",
+    "scratch_read_bytes_per_token_per_layer": 0,
+    "scratch_write_bytes_per_token_per_layer": 0,
+    "scratch_status": "not_modeled_without_calibrated_kernel_offchip_trace"
+  },
+  "addressing": {
+    "object_alignment_bytes": 4096,
+    "kv_slot_identity": "canonical_logical_block_id",
+    "kv_slot_layout": "layer_major_token_major_gqa",
+    "kv_slot_layout_status": "canonical_object_mapping_not_backend_measured"
+  }
+}

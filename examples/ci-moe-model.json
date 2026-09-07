@@ -1,0 +1,51 @@
+{
+  "schema": {
+    "name": "hbserve.model",
+    "version": 2
+  },
+  "model_id": "moe-ci",
+  "provenance": {
+    "kind": "ci_fixture",
+    "source": "hand-accounted tiny MoE model; not a research workload",
+    "sha256": null
+  },
+  "vocab_size": 8,
+  "embedding_bytes": 64,
+  "final_norm_bytes": 16,
+  "lm_head_bytes": 64,
+  "lm_head_flops_per_token": 128,
+  "tie_word_embeddings": false,
+  "layers": [
+    {
+      "attention_weight_bytes": 32,
+      "ffn_weight_bytes": 0,
+      "router_weight_bytes": 8,
+      "shared_expert_weight_bytes": 24,
+      "expert_weight_bytes": [
+        64,
+        64,
+        64,
+        64
+      ],
+      "top_k": 2,
+      "kv_bytes_per_token": 4,
+      "flops_per_token": 384,
+      "attention_flops_per_context_token": 8
+    }
+  ],
+  "traffic_model": {
+    "weight_reads": "once_per_batch_per_object",
+    "expert_weight_reads": "once_per_unique_expert_per_batch_layer",
+    "attention_kv_reads": "existing_context_once_per_request_per_layer",
+    "kv_writes": "scheduled_input_tokens_once_per_layer",
+    "embedding_reads": "one_row_per_scheduled_input_token",
+    "output_head_reads": "once_per_batch_that_emits_output",
+    "offchip_scratch": "excluded_without_kernel_trace",
+    "output_token_semantics": "first_token_from_final_prefill_v1"
+  },
+  "compute_model": {
+    "linear_flops": "2_x_activated_matrix_parameters_per_token_per_layer",
+    "attention_flops": "4_x_heads_x_head_dim_per_token_per_context_token_causal",
+    "lm_head_flops": "2_x_vocab_x_hidden_per_output_emitting_request"
+  }
+}
