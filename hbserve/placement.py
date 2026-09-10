@@ -14,6 +14,7 @@ from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import cached_property
+from hbserve.prefix import PrefixCache, block_keys
 import heapq
 import math
 from typing import Any, Mapping, Sequence
@@ -117,6 +118,8 @@ class PlacementSpec:
     external_page_size_bytes: int = 4096
     kv_block_tokens: int = 16
     kv_placement: KvPlacement = field(default_factory=KvPlacement)
+    prefix_cache_bytes: int = 0
+    prefix_cache_ttl_ns: float | None = None
 
     def __post_init__(self) -> None:
         _positive_integer(self.hbm_capacity_bytes, "HBM capacity")
@@ -127,6 +130,15 @@ class PlacementSpec:
         )
         _nonnegative_integer(self.hbm_model_cache_bytes, "HBM model cache")
         _positive_integer(self.kv_block_tokens, "KV block tokens")
+        _nonnegative_integer(self.prefix_cache_bytes, "prefix cache bytes")
+        if self.prefix_cache_ttl_ns is not None and (
+            isinstance(self.prefix_cache_ttl_ns, bool)
+            or not isinstance(self.prefix_cache_ttl_ns, (int, float))
+            or not math.isfinite(self.prefix_cache_ttl_ns) or self.prefix_cache_ttl_ns <= 0
+        ):
+            raise HBServeError("prefix cache TTL must be finite and positive")
+        if self.prefix_cache_ttl_ns is not None and self.prefix_cache_bytes == 0:
+            raise HBServeError("prefix cache TTL requires a nonzero cache budget")
         if not isinstance(self.kv_placement, KvPlacement):
             raise HBServeError("kv_placement must be a KvPlacement")
         for name, value in (
@@ -217,6 +229,8 @@ class PlacementSpec:
             "external_page_size_bytes": self.external_page_size_bytes,
             "kv_block_tokens": self.kv_block_tokens,
             "kv_placement": self.kv_placement.canonical(),
+            "prefix_cache_bytes": self.prefix_cache_bytes,
+            "prefix_cache_ttl_ns": self.prefix_cache_ttl_ns,
         }
 
     @cached_property
@@ -323,6 +337,7 @@ class _BlockPool:
         self.end = begin + self.capacity_blocks * block_bytes
         self._free: list[int] = list(range(self.capacity_blocks))
         heapq.heapify(self._free)
+        self.references: dict[int, int] = {}
 
     @property
     def free_blocks(self) -> int:
@@ -338,13 +353,27 @@ class _BlockPool:
                 f"{self.tier} KV pool cannot allocate {count} blocks "
                 f"({len(self._free)} free)"
             )
-        return [heapq.heappop(self._free) for _ in range(count)]
+        blocks = [heapq.heappop(self._free) for _ in range(count)]
+        for block in blocks:
+            self.references[block] = 1
+        return blocks
+
+    def retain(self, blocks: Sequence[int]) -> None:
+        for block in blocks:
+            if block not in self.references:
+                raise HBServeError("cannot retain an unallocated KV block")
+            self.references[block] += 1
 
     def release(self, blocks: Sequence[int]) -> None:
         for block in blocks:
             if not 0 <= block < self.capacity_blocks:
                 raise HBServeError(f"{self.tier} KV block {block} is out of range")
-            heapq.heappush(self._free, block)
+            if block not in self.references:
+                raise HBServeError(f"{self.tier} KV pool released a block twice")
+            self.references[block] -= 1
+            if self.references[block] == 0:
+                del self.references[block]
+                heapq.heappush(self._free, block)
         if len(self._free) > self.capacity_blocks:
             raise HBServeError(f"{self.tier} KV pool released a block twice")
 
@@ -372,6 +401,8 @@ class _RequestKv:
     tier: str = KV_HOT_TIER
     blocks: list[list[int]] = field(default_factory=list)
     last_batch_id: int = -1
+    prefix_keys: tuple[str, ...] = ()
+    prefix_hit_tokens: int = 0
 
     @property
     def blocks_per_layer(self) -> int:
@@ -394,6 +425,7 @@ class _KvPlan:
     needed_hot_blocks: int
     swap_in: tuple[str, ...]
     victims: tuple[str, ...]
+    prefix_evictions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -444,6 +476,8 @@ class HBServePlacement:
     ) -> None:
         if not models:
             raise HBServeError("serving placement requires models")
+        if spec.prefix_cache_bytes and any(layer.is_moe for model in models.values() for layer in model.layers):
+            raise HBServeError("MoE prefix reuse requires per-prefix routing identity; token-only prefix caching supports dense models only")
         self.models = dict(models)
         self.spec = spec
         self.hbf_geometry = hbf_geometry
@@ -603,6 +637,10 @@ class HBServePlacement:
         self._hot = _BlockPool(
             KV_HOT_TIER, self.hbm_kv_begin, self.hbm_kv_end, self.kv_block_bytes
         )
+        if spec.prefix_cache_bytes > self._hot.capacity_bytes:
+            raise HBServeError("prefix cache budget exceeds the shared HBM KV pool")
+        self._prefix = PrefixCache(self._hot, spec.prefix_cache_bytes, spec.prefix_cache_ttl_ns)
+        self._model_digests = {model_id: model.digest for model_id, model in self.models.items()}
         self._cold: _BlockPool | None = None
         cold_tier = spec.kv_placement.cold
         if cold_tier == "hbf":
@@ -733,6 +771,7 @@ class HBServePlacement:
             ],
             "cache_free_extents": self._cache_allocator.canonical(),
             "kv_hot_free_blocks": self._hot.free_blocks,
+            "prefix_cache": self._prefix.receipt(),
             "kv_cold_free_blocks": (
                 None if self._cold is None else self._cold.free_blocks
             ),
@@ -764,21 +803,38 @@ class HBServePlacement:
         }
 
     # -------------------------------------------------------------- requests
-    def admit_request(self, request: RequestSpec) -> None:
+    def admit_request(self, request: RequestSpec, *, now_ns: float = 0.0) -> int:
         """Register a request; blocks are allocated later by ``reserve``."""
 
         if request.request_id in self._kv:
-            return
+            return self._kv[request.request_id].prefix_hit_tokens
         try:
             model = self.models[request.model_id]
         except KeyError as error:
             raise HBServeError(
                 f"cannot admit request for unknown model {request.model_id}"
             ) from error
-        self._kv[request.request_id] = _RequestKv(
+        state = _RequestKv(
             request=request, model=model, order=self._next_order
         )
+        if self.spec.prefix_cache_bytes and request.token_ids is not None:
+            state.prefix_keys = block_keys(request, self._model_digests[model.model_id], self.spec.kv_block_tokens)
+            entries = self._prefix.lookup(state.prefix_keys, (request.prompt_tokens - 1) // self.spec.kv_block_tokens,
+                                          self.spec.kv_block_tokens, now_ns)
+            if entries:
+                state.blocks = [[entry[layer] for entry in entries] for layer in range(model.num_layers)]
+                state.prefix_hit_tokens = len(entries) * self.spec.kv_block_tokens
+        self._kv[request.request_id] = state
         self._next_order += 1
+        return state.prefix_hit_tokens
+
+    def complete_batch(self, batch: CanonicalServingBatch, finish_ns: float) -> None:
+        if not self.spec.prefix_cache_bytes:
+            return
+        for item in batch.schedule.slices:
+            state = self._state(item.request_id)
+            self._prefix.publish(state.prefix_keys, state.blocks,
+                                 min(item.token_end, state.request.prompt_tokens) // self.spec.kv_block_tokens, finish_ns)
 
     def is_admitted(self, request_id: str) -> bool:
         return request_id in self._kv
@@ -812,6 +868,22 @@ class HBServePlacement:
                 needed += state.total_blocks
         victims: list[str] = []
         deficit = needed - self._hot.free_blocks
+        prefix_evictions = []
+        releases: dict[int, int] = {}
+
+        def reclaimed(blocks):
+            count = 0
+            for block in blocks:
+                releases[block] = releases.get(block, 0) + 1
+                count += int(releases[block] == self._hot.references[block])
+            return count
+
+        if deficit > 0:
+            for key, entry in self._prefix.entries.items():
+                prefix_evictions.append(key)
+                deficit -= reclaimed(entry.blocks)
+                if deficit <= 0:
+                    break
         if deficit > 0:
             if self._cold is None:
                 return None
@@ -833,13 +905,14 @@ class HBServePlacement:
                     return None
                 victims.append(state.request.request_id)
                 cold_free -= state.total_blocks
-                deficit -= state.total_blocks
+                deficit -= reclaimed(block for layer in state.blocks for block in layer)
             if deficit > 0:
                 return None
         return _KvPlan(
             needed_hot_blocks=needed,
             swap_in=tuple(swap_in),
             victims=tuple(victims),
+            prefix_evictions=tuple(prefix_evictions),
         )
 
     def can_reserve(self, slices: Sequence[BatchSlice]) -> bool:
@@ -882,6 +955,8 @@ class HBServePlacement:
                 "every waiting request"
             )
         swap_out_blocks = 0
+        for key in plan.prefix_evictions:
+            self._prefix.evict(key)
         for request_id in plan.victims:
             assert self._cold is not None
             swap_out_blocks += self._migrate(
@@ -917,6 +992,7 @@ class HBServePlacement:
             "swap_in_requests": list(plan.swap_in),
             "swap_in_blocks": swap_in_blocks,
             "hot_free_blocks_after": self._hot.free_blocks,
+            "prefix_cache_evictions": len(plan.prefix_evictions),
         }
 
     def preempt_request(self, request_id: str) -> dict[str, Any]:
@@ -1525,11 +1601,13 @@ class HBServePlacement:
             ],
             "cumulative": self._cumulative(),
             "final_state": state,
+            "prefix_cache": self._prefix.receipt(),
             "final_invariants": {
                 "all_request_kv_released": not self._kv,
                 "kv_hot_pool_fully_free": (
                     self._hot.free_blocks == self._hot.capacity_blocks
                 ),
+                "kv_hot_allocations_accounted_for": self._hot.free_blocks + len(self._hot.references) == self._hot.capacity_blocks,
                 "kv_cold_pool_fully_free": (
                     self._cold is None
                     or self._cold.free_blocks == self._cold.capacity_blocks

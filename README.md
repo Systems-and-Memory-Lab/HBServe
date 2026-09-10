@@ -21,6 +21,8 @@ formulas, and each result carries a machine-readable capability boundary.
 - Token-budgeted continuous batching with chunked prefill and decode.
 - Incremental 16-token paged KV allocation, migration, preemption, and
   recomputation.
+- Content-addressed full-block prefix reuse with a bounded, reference-counted
+  HBM cache, LRU pressure eviction, and optional TTL.
 - Object-exact weight, embedding, LM-head, block-table, and KV traffic.
 - HBM, HBF, and external-memory placement with byte-conservation receipts.
 - Roofline, memory-only, or linear compute timing.
@@ -90,6 +92,16 @@ For physical execution, replace `--preflight-only` with
 Full-scale execution can be expensive; check the generated workload first.
 Use `--allow-dirty` for exploratory runs from a modified or non-Git installation.
 See [Fixed windows](docs/windows.md) for modes, profiles, and interpretation.
+See [Prefix caching](docs/prefix-caching.md) for identity, lifecycle, synthetic
+reuse inputs, and the volatile-cache boundary.
+
+## Recovery scope
+
+The `hbserve.recovery` API is used by HBFSim's Q5 bounded resident-KV controls
+in `studies/hbf_persistence/hbserve_recovery.py`. It models committed-boundary
+HBF media and KV recovery, not scheduler resume or persistent prefix caching.
+HBServe tests its integrity and payload-accounting helpers without a simulator;
+HBFSim's separate recovery tests execute small native sessions.
 
 ## Why the workload is credible
 
@@ -127,11 +139,12 @@ a serving profiler to cache-line address/arrival traces, and
 ```bash
 python3 -B tests/test_hbserve.py
 python3 -B tests/test_windows.py
+python3 -B tests/test_recovery.py
 python3 -B tests/test_hbserve.py --simulator /path/to/HBFSim/build/hbfsim
 python3 -B tests/test_windows.py --simulator /path/to/HBFSim/build/hbfsim
 ```
 
-Without `--simulator`, both suites are self-contained and skip physical tests.
+Without `--simulator`, the serving/window suites are self-contained and skip physical tests.
 With it, they exercise closed-loop serving and a tiny fixed-window execution;
 the tests do not execute the full miniquick or full-scale physical matrix.
 

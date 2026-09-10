@@ -163,7 +163,7 @@ def load_request_trace(path: Path) -> RequestTrace:
         raise HBServeError("request trace requests must be an array")
     requests: list[RequestSpec] = []
     for index, raw_value in enumerate(raw_requests):
-        raw = _mapping(raw_value, f"requests[{index}]")
+        raw = {"cache_salt": "", **_mapping(raw_value, f"requests[{index}]")}
         _exact(
             raw,
             {
@@ -173,6 +173,7 @@ def load_request_trace(path: Path) -> RequestTrace:
                 "prompt_tokens",
                 "output_tokens",
                 "token_ids",
+                "cache_salt",
             },
             f"requests[{index}]",
         )
@@ -184,6 +185,7 @@ def load_request_trace(path: Path) -> RequestTrace:
         requests.append(
             RequestSpec(
                 request_id=_string(raw["request_id"], "request ID"),
+                cache_salt=raw["cache_salt"],
                 arrival_ns=_number(raw["arrival_ns"], "request arrival"),
                 model_id=_string(raw["model_id"], "request model ID"),
                 prompt_tokens=_integer(
@@ -276,10 +278,13 @@ PLACEMENT_FIELDS = {
     "external_page_size_bytes",
     "kv_block_tokens",
     "kv_placement",
+    "prefix_cache_bytes",
+    "prefix_cache_ttl_ns",
 }
 
 
 def placement_from_dict(value: Mapping[str, Any]) -> PlacementSpec:
+    value = {"prefix_cache_bytes": 0, "prefix_cache_ttl_ns": None, **value}
     _exact(value, PLACEMENT_FIELDS, "serving placement")
     if value["schema"] != PLACEMENT_SCHEMA:
         raise HBServeError(
@@ -297,6 +302,8 @@ def placement_from_dict(value: Mapping[str, Any]) -> PlacementSpec:
     if cold is not None:
         cold = _string(cold, "kv_placement.cold")
     return PlacementSpec(
+        prefix_cache_bytes=_integer(value["prefix_cache_bytes"], "prefix cache bytes"),
+        prefix_cache_ttl_ns=value["prefix_cache_ttl_ns"],
         hbm_capacity_bytes=_integer(
             value["hbm_capacity_bytes"], "HBM capacity", minimum=1
         ),
@@ -470,6 +477,7 @@ def load_synthetic_request_config(path: Path) -> SyntheticRequestConfig:
 def synthetic_request_config_from_dict(
     value: Mapping[str, Any],
 ) -> SyntheticRequestConfig:
+    value = {"shared_prefix_tokens": 0, "shared_prefix_groups": 1, "prefix_reuse_probability": 1.0, **value}
     _exact(
         value,
         {
@@ -483,6 +491,9 @@ def synthetic_request_config_from_dict(
             "model_probabilities",
             "seed",
             "first_arrival_policy",
+            "shared_prefix_tokens",
+            "shared_prefix_groups",
+            "prefix_reuse_probability",
         },
         "synthetic request config",
     )
@@ -492,6 +503,9 @@ def synthetic_request_config_from_dict(
         value["model_probabilities"], "synthetic model probabilities"
     )
     return SyntheticRequestConfig(
+        shared_prefix_tokens=_integer(value["shared_prefix_tokens"], "shared prefix tokens"),
+        shared_prefix_groups=_integer(value["shared_prefix_groups"], "shared prefix groups", minimum=1),
+        prefix_reuse_probability=value["prefix_reuse_probability"],
         request_count=_integer(
             value["request_count"], "request_count", minimum=1
         ),

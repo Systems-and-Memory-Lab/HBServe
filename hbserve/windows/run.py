@@ -29,14 +29,14 @@ def run_window(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int
             parser.error("--topologies must contain non-empty, unique IDs")
     provenance = gate_provenance(
         parser,
-        None if args.preflight_only else args.simulator,
+        args.simulator,
         allow_dirty=args.allow_dirty,
         config_paths=(args.experiment,),
     )
     try:
         document = load_json_object(args.experiment, "fixed-window experiment")
         result = (
-            build_preflight(args.experiment)
+            build_preflight(args.experiment, simulator_path=args.simulator)
             if args.preflight_only
             else run_reference_experiment(
                 experiment_path=args.experiment,

@@ -8,6 +8,7 @@ targets, addresses, operations, byte counts, timing, and dependencies.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
@@ -169,13 +170,12 @@ def _build_receipt(
 
 
 class DirectAttachedRemapper:
-    """Address-only direct attachment across the active HBM and HBF stacks.
+    """Static direct attachment across the active HBM and HBF stacks.
 
-    Canonical addresses are distributed at a fixed coarse granularity.  HBM is
-    filled up to its usable physical capacity and the remaining units are
-    balanced across the canonical address space, avoiding region- or
-    workload-semantic placement decisions.  HBF accesses go directly to the
-    logical HBF interface; no HBM staging or D2D traffic is introduced.
+    The default balances capacity across canonical addresses. An optional
+    complete priority order selects which coarse units occupy HBM instead.
+    Both paths compact addresses within each medium and use the logical HBF
+    interface without staging or migration.
     """
 
     topology = "gpu-direct-attached"
@@ -191,6 +191,7 @@ class DirectAttachedRemapper:
         placement_granularity_bytes: int,
         reserved_hbm_bytes: int = 0,
         reserved_hbf_bytes: int = 0,
+        hbm_priority_units: Sequence[int] | None = None,
     ) -> None:
         self.geometry = hbf_geometry
         self.page_size = hbf_geometry.page_size_bytes
@@ -270,6 +271,15 @@ class DirectAttachedRemapper:
         self.hbf_units = self.total_units - self.hbm_units
         if self.hbf_stacks == 0 and self.hbf_units:
             raise RemapError("direct placement spilled without an HBF tier")
+        self._selected_hbm_units: tuple[int, ...] | None = None
+        if hbm_priority_units is not None:
+            priority = tuple(hbm_priority_units)
+            if (len(priority) != self.total_units or
+                    any(isinstance(unit, bool) or not isinstance(unit, int) or
+                        not 0 <= unit < self.total_units for unit in priority) or
+                    len(set(priority)) != self.total_units):
+                raise RemapError("HBM priority must rank every placement unit exactly once")
+            self._selected_hbm_units = tuple(sorted(priority[:self.hbm_units]))
 
         # The balanced placement is a closed-form Beatty partition.  Never
         # materialize one target/rank entry per placement unit. A large
@@ -294,7 +304,7 @@ class DirectAttachedRemapper:
             + self.hbf_resident_payload_bytes
             != self.address_space_bytes
         ):
-            raise RemapError("direct balanced placement lost payload bytes")
+            raise RemapError("direct placement lost payload bytes")
         # Target-local ranks are dense, so the compact allocation extent equals
         # the payload after accounting for a partial final canonical unit.
         self.hbm_allocation_bytes = self.hbm_resident_payload_bytes
@@ -334,11 +344,16 @@ class DirectAttachedRemapper:
     def post_serving_flush_required(self) -> bool:
         return False
 
+    def _hbm_units_before(self, unit: int) -> int:
+        if self._selected_hbm_units is not None:
+            return bisect_left(self._selected_hbm_units, unit)
+        return unit * self.hbm_units // self.total_units
+
     def _unit_target_and_rank(self, unit: int) -> tuple[str, int]:
         if not 0 <= unit < self.total_units:
             raise RemapError("direct placement unit is out of range")
-        hbm_before = unit * self.hbm_units // self.total_units
-        hbm_after = (unit + 1) * self.hbm_units // self.total_units
+        hbm_before = self._hbm_units_before(unit)
+        hbm_after = self._hbm_units_before(unit + 1)
         if hbm_after > hbm_before:
             return "HBM", hbm_before
         return "HBF_LOGICAL", unit - hbm_before
@@ -346,12 +361,9 @@ class DirectAttachedRemapper:
     def resident_hbf_bytes(self, address: int, byte_count: int) -> int:
         """HBF-resident bytes of one canonical range under this placement.
 
-        Closed form over the same Beatty partition that request remapping
-        uses, so per-object residency attribution (e.g. how much of the
-        model-weight region lives on HBF) can never diverge from execution
-        placement. Whole units telescope through
-        floor(u * hbm_units / total_units); only the partial edge units
-        consult the per-unit rule.
+        Count whole units through the same rank function used by request
+        remapping, and inspect the partial edge units. This supports both
+        the balanced partition and a precomputed static priority plan.
         """
 
         end = address + byte_count
@@ -376,8 +388,8 @@ class DirectAttachedRemapper:
             begin_full = first_unit + 1
             full_units = last_unit - begin_full
             hbm_full = (
-                last_unit * self.hbm_units // self.total_units
-                - begin_full * self.hbm_units // self.total_units
+                self._hbm_units_before(last_unit)
+                - self._hbm_units_before(begin_full)
             )
             total += (full_units - hbm_full) * self.granularity
         return total
@@ -564,7 +576,7 @@ class DirectAttachedRemapper:
                 ),
             },
             routing_sidecar_consumed=False,
-            placement_classes_consumed=False,
+            placement_classes_consumed=("layout_placement_class" in self.policy_detail.get("planning_inputs", [])),
         )
         self._seen_batches.add(batch.batch_id)
         return TransactionBatch(
@@ -786,10 +798,16 @@ class HbmFrontedBackingRemapper:
             raise RemapError(
                 "canonical address space exceeds the backing capacity"
             )
+        # Nonallocating reads still pass through the HBM front. Deduct their
+        # bounded staging ring from physical HBM, never grant a free backing
+        # read to the GPU or silently allocate extra HBM capacity.
+        self.stream_staging_bytes = (
+            self.read_ahead_window_bytes if policy != "address_only_lru" else 0
+        )
         self.cache_slots = (
-            self.hbm_capacity_bytes - self.reserved_hbm_bytes
+            self.hbm_capacity_bytes - self.reserved_hbm_bytes - self.stream_staging_bytes
         ) // self.granularity
-        if self.cache_slots == 0:
+        if self.cache_slots <= 0:
             raise RemapError(
                 "HBM-fronted cache cannot contain one migration unit"
             )
@@ -814,11 +832,13 @@ class HbmFrontedBackingRemapper:
         # share the fill, write-back, credit, and flush machinery; they
         # differ only in which resident unit an eviction selects and in
         # whether a missed READ is admitted (filled into HBM) or served as
-        # a stream straight from the backing store:
+        # a nonallocating stream through bounded HBM staging:
         #   address_only_lru     - admit every miss, evict least recently
         #                          used (the reference policy);
-        #   decayed_lfu          - admit every miss, evict the lowest
-        #                          decayed access frequency;
+        #   decayed_lfu          - fill free slots; at capacity require more
+        #                          than a one-observation frequency advantage.
+        #                          The triggering read alone cannot win admission
+        #                          just by occurring earlier in a cyclic scan;
         #   threshold_promotion  - a read is admitted only on its second
         #                          touch within the decay epoch (single-pass
         #                          streams never enter HBM), writes always
@@ -870,9 +890,15 @@ class HbmFrontedBackingRemapper:
         self._freq_buckets: dict[int, OrderedDict[int, None]] = {}
         self._min_freq = 0
         self._accesses_since_decay = 0
-        self._decay_every = max(4 * self.cache_slots, 1024)
+        decay_units = (
+            (self.address_space_bytes + self.granularity - 1) // self.granularity
+            if self.policy == "decayed_lfu" else self.cache_slots
+        )
+        self._decay_every = max(4 * decay_units, 1024)
         self._resident: OrderedDict[int, _BackingCacheLine] = OrderedDict()
         self._slot_release: dict[int, str] = {}
+        self._stream_slot_release: dict[int, str] = {}
+        self._next_stream_slot = 0
         # Completion that installs the newest backing-store version for a
         # migration unit.  It is needed only after a dirty eviction; keeping
         # it explicit lets a later speculative read cross unrelated timed
@@ -913,6 +939,8 @@ class HbmFrontedBackingRemapper:
             "final_flush_chunks": 0,
             "stream_bypass_reads": 0,
             "stream_bypass_bytes": 0,
+            "stream_staging_chunks": 0,
+            "stream_transfer_bytes": 0,
             "non_kv_pool_evictions": 0,
             "kv_pool_evictions": 0,
         }
@@ -982,13 +1010,23 @@ class HbmFrontedBackingRemapper:
             self._min_freq = 0
             for u in residents:
                 self._bucket_add(u, max(self._touch_counts.get(u, 0), 1))
-        return count
+        return self._touch_counts.get(unit, 0)
 
     def _admit(self, unit: int, op: str, touch_count: int) -> bool:
         if op == "W":
             return True
-        if self.policy in {"address_only_lru", "decayed_lfu"}:
+        if self.policy == "address_only_lru":
             return True
+        if self.policy == "decayed_lfu":
+            if len(self._resident) < self.cache_slots:
+                return True
+            while not self._freq_buckets.get(self._min_freq):
+                self._min_freq += 1
+            # One-observation hysteresis: the current miss alone is not
+            # evidence of greater reuse. Without this, a cyclic scan repeatedly
+            # evicts equally frequent residents that have not been visited yet
+            # in the current pass. Genuinely hotter candidates still enter.
+            return touch_count > self._min_freq + 1
         # threshold_promotion and class_aware: reads are admitted only on
         # their second touch within the decay epoch. class_aware KV units
         # enter through writes (the write front) and are then shielded at
@@ -1369,27 +1407,51 @@ class HbmFrontedBackingRemapper:
 
                 self._cumulative["miss_bytes"] += segment_bytes
                 if not self._admit(unit, logical.op, touch_count):
-                    # Stream bypass: the read is served straight from the
-                    # backing store and installs nothing, so single-pass
-                    # streams cannot flood the HBM front. Ordering against
-                    # an earlier dirty write-back of this unit is preserved
-                    # through the backing-release completion.
+                    # Bypass the persistent cache, not the HBM/D2D path.
+                    # Each staging slot remains occupied until GPU consumption;
+                    # both address-version and slot-release dependencies survive
+                    # batch boundaries through retain.
                     bypass_dependencies = list(dependencies)
                     bypass_release = self._backing_release.get(unit)
                     if bypass_release is not None:
                         bypass_dependencies.append(bypass_release)
-                    user = emit(
-                        target=self.backing_target,
-                        op="R",
-                        addr=cursor,
-                        byte_count=segment_bytes,
-                        issue_ns=logical.issue_ns,
-                        dependencies=tuple(
-                            dict.fromkeys(bypass_dependencies)
-                        ),
-                    )
-                    projected.append(user)
-                    completions.append(user)
+                    stream_begin = cursor // self.page_size * self.page_size
+                    stream_end = _align_up(segment_end, self.page_size)
+                    for chunk_address, chunk_bytes in chunks(stream_begin, stream_end - stream_begin):
+                        stream_slot = self._next_stream_slot
+                        self._next_stream_slot = (
+                            stream_slot + 1
+                        ) % (self.stream_staging_bytes // self.transfer_chunk_bytes)
+                        ready = list(bypass_dependencies)
+                        previous_user = self._stream_slot_release.get(stream_slot)
+                        if previous_user is not None:
+                            ready.append(previous_user)
+                        fills = backing_fill(
+                            address=chunk_address, byte_count=chunk_bytes,
+                            issue_ns=logical.issue_ns, dependencies=ready,
+                            transfer_dependencies=transfer_dependencies,
+                        )
+                        staging_address = (
+                            self.reserved_hbm_bytes + self.cache_slots * self.granularity
+                            + stream_slot * self.transfer_chunk_bytes
+                        )
+                        install = emit(
+                            target="HBM", op="W", addr=staging_address,
+                            byte_count=chunk_bytes, issue_ns=logical.issue_ns,
+                            dependencies=fills,
+                        )
+                        user = emit(
+                            target="HBM", op="R",
+                            addr=staging_address + max(cursor - chunk_address, 0),
+                            byte_count=min(segment_end, chunk_address + chunk_bytes) - max(cursor, chunk_address),
+                            issue_ns=logical.issue_ns,
+                            dependencies=(install,),
+                        )
+                        self._stream_slot_release[stream_slot] = user
+                        projected.append(user)
+                        completions.append(user)
+                        self._cumulative["stream_staging_chunks"] += 1
+                        self._cumulative["stream_transfer_bytes"] += chunk_bytes
                     self._cumulative["stream_bypass_reads"] += 1
                     self._cumulative["stream_bypass_bytes"] += segment_bytes
                     cursor = segment_end
@@ -1653,6 +1715,9 @@ class HbmFrontedBackingRemapper:
                 for credit in self._read_ahead_credits
             ],
             "read_ahead_credit_bytes": self._read_ahead_credit_bytes,
+            "next_stream_slot": self._next_stream_slot,
+            "touch_counts": sorted(self._touch_counts.items()),
+            "accesses_since_decay": self._accesses_since_decay,
         }
         causal_state_document = {
             "slot_release": [
@@ -1663,6 +1728,7 @@ class HbmFrontedBackingRemapper:
                 {"unit": unit, "transaction": transaction}
                 for unit, transaction in sorted(self._backing_release.items())
             ],
+            "stream_slot_release": sorted(self._stream_slot_release.items()),
             "read_ahead_credit_release": [
                 {
                     "generation": credit.generation,
@@ -1682,7 +1748,7 @@ class HbmFrontedBackingRemapper:
             policy={
                 "name": (
                     f"{self.policy}_credit_jit_chunked_read_ahead_"
-                    "page_dirty_writeback_v6"
+                    "page_dirty_writeback_v7"
                 ),
                 "decision_inputs": [
                     "addr",
@@ -1700,6 +1766,9 @@ class HbmFrontedBackingRemapper:
                 "read_ahead_window_bytes": self.read_ahead_window_bytes,
                 "read_ahead_window_chunks": self.read_ahead_window_chunks,
                 "cache_usable_bytes": self.cache_slots * self.granularity,
+                "stream_staging_bytes": self.stream_staging_bytes,
+                "nonallocating_read_path": "backing_read_transfer_hbm_staging_gpu_read",
+                "stream_slot_release": "gpu_read_completion",
                 "initial_cache_state": "empty_at_session_start",
                 "cache_state_persists_across_batches": True,
                 "gpu_visible_tier": "HBM_only",
@@ -1707,7 +1776,13 @@ class HbmFrontedBackingRemapper:
                 "backing_target": self.backing_target,
                 "backing_capacity_bytes": self.backing_capacity_bytes,
                 "backing_role": "complete_backing_store",
-                "admission": "demand_fill",
+                "admission": (
+                    "free_slot_or_frequency_above_min_resident_plus_one; writes_always"
+                    if self.policy == "decayed_lfu" else
+                    "second_touch; writes_always"
+                    if self.policy in {"threshold_promotion", "class_aware"}
+                    else "demand_fill"
+                ),
                 "fill_scheduling": (
                     "credit_backing_read_ahead_jit_chunked_install"
                 ),
@@ -1736,6 +1811,8 @@ class HbmFrontedBackingRemapper:
                 "promotion": (
                     "second_touch_within_decay_epoch"
                     if self.policy in {"threshold_promotion", "class_aware"}
+                    else "frequency_admission_with_one_observation_hysteresis"
+                    if self.policy == "decayed_lfu"
                     else "every_miss"
                 ),
                 "touch_decay_every_accesses": self._decay_every,
@@ -1810,6 +1887,7 @@ class HbmFrontedBackingRemapper:
     def _retained_dependency_ids(self) -> tuple[str, ...]:
         return _retained_ids(
             self._slot_release.values(),
+            self._stream_slot_release.values(),
             self._backing_release.values(),
             (credit.release for credit in self._read_ahead_credits),
         )

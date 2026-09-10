@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-CAPABILITY_SCHEMA = {"name": "hbserve.capabilities", "version": 3}
+CAPABILITY_SCHEMA = {"name": "hbserve.capabilities", "version": 4}
 
 
 def current_capabilities() -> dict[str, Any]:
@@ -27,6 +27,18 @@ def current_capabilities() -> dict[str, Any]:
                 "ttft_tpot": "not_reported",
                 "same_logical_trace_across_topologies": True,
                 "preflight_without_simulator": True,
+                "static_direct_placement_policies": [
+                    "capacity_balanced", "weights_first", "kv_first", "profiled_hotset",
+                ],
+                "independent_training_profile": "python -m hbserve profile",
+                "direct_placement_migration": False,
+                "peer_KV_policies": ["static", "capacity_migration"],
+                "peer_KV_initial_state": "empty_born_on_first_write",
+                "peer_KV_preflight": "requires_native_resolved_capacity",
+                "tiered_fill_and_dirty_writeback": True,
+                "hbm_fronted_backing": ["hbf", "external"],
+                "cache_policies": ["address_only_lru", "decayed_lfu", "threshold_promotion", "class_aware"],
+                "per_topology_mapping_configuration": True,
             },
         },
         "request_fields": [
@@ -36,10 +48,17 @@ def current_capabilities() -> dict[str, Any]:
             "prompt_tokens",
             "output_tokens",
             "token_ids_optional",
+            "cache_salt",
         ],
         "conversation_ancestry": False,
-        "prefix_block_hash_identity": False,
-        "prefix_cache_lifecycle": False,
+        "prefix_block_hash_identity": True,
+        "prefix_cache_lifecycle": True,
+        "prefix_cache": {"tier": "hbm", "bounded_capacity": True, "ttl": True,
+                         "model_scope": "dense_only_until_per_prefix_MoE_route_identity_is_supported",
+                         "identity": "model_digest_parent_hash_tokens_cache_salt",
+                         "publication": "full_prompt_blocks_after_physical_batch_completion",
+                         "storage": "reference_counted_shared_KV_blocks", "persistent": False,
+                         "requires_explicit_token_ids": True},
         "scheduler": "token_budgeted_mixed_iteration_continuous_batcher_v1",
         "kv_allocation_policy": "paged_blocks_incremental_v1",
         "kv_placement_targets": {"hot": ["hbm"], "cold": ["hbf", "external"]},

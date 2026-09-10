@@ -39,30 +39,14 @@ from hbserve.windows.remap import (  # noqa: E402
 )
 from hbserve.contracts import HBServeError
 from hbserve.io import load_json_object
+from hbserve.windows.placement import placement_order
+from hbserve.windows.peer import PeerCapacityError, PeerKvMigrationRemapper
+from hbserve.windows.memory_trace import canonical_sha256
 
 
 DEFAULT_EXPERIMENT = ROOT / "configs/windows/miniquick-serving.json"
 DEFAULT_SIMULATOR = None
-CORE_TOPOLOGY_IDS = (
-    "all-hbm",
-    "8h0f-dram",
-    "8h0f-ssd",
-    "6h2f",
-    "4h4f",
-    "2h6f",
-    "0h8f",
-)
 CXL_SSD_TOPOLOGY_ID = "8h0f-cxl-ssd"
-SUPPORTED_TOPOLOGY_IDS = (
-    "all-hbm",
-    "8h0f-dram",
-    "8h0f-ssd",
-    CXL_SSD_TOPOLOGY_ID,
-    "6h2f",
-    "4h4f",
-    "2h6f",
-    "0h8f",
-)
 CXL_SSD_WRITE_COMPLETION_BOUNDARY = {
     "write_completion": "caller_completion_after_device_internal_dram_acceptance",
     "nand_destage": "excluded_after_internal_dram_acceptance",
@@ -86,17 +70,20 @@ TOPOLOGY_VIEW_SCHEMA = {
     "name": "hbserve.topology_view",
     "version": 1,
 }
-EXPECTED_CAPACITY_OOM_STAGE = "direct_initial_population_placement"
+EXPECTED_CAPACITY_OOM_STAGE = "initial_population_placement"
 # Only these constructor failures prove that the fixed population itself does
 # not fit. Configuration, alignment, policy, and protocol errors must never be
 # reclassified as an expected OOM merely because a row carries a declaration.
 DIRECT_CAPACITY_OOM_FAILURES = {
+    "all-HBM direct placement cannot contain the canonical address space and reservation": "hbm_population_exceeds_physical_capacity",
     "direct placement exceeds physical HBM capacity": (
         "hbm_placement_exceeds_physical_capacity"
     ),
     "direct HBF image and mapping pages exceed raw capacity": (
         "hbf_image_and_mapping_exceed_raw_capacity"
     ),
+    "canonical address space exceeds the backing capacity": "backing_capacity_exceeded",
+    "HBM-fronted HBF image and mapping pages exceed raw capacity": "hbf_backing_image_and_mapping_exceed_raw_capacity",
 }
 
 
@@ -194,6 +181,8 @@ class ExperimentContext:
 
 def load_experiment_context(
     experiment_path: Path = DEFAULT_EXPERIMENT,
+    *,
+    simulator_path: Path | None = None,
 ) -> ExperimentContext:
     experiment_path = experiment_path.resolve()
     experiment = _read_json(experiment_path, "fixed-footprint experiment")
@@ -249,6 +238,12 @@ def load_experiment_context(
         population=population,
         workload=workload,
     )
+    mapping = dict(_mapping(experiment.get("mapping"), "experiment mapping"))
+    direct = dict(_mapping(mapping.get("direct_placement", {}), "direct placement"))
+    if "profile" in direct:
+        direct["profile"] = str(_root_path(direct["profile"], "training profile", experiment_path.parent))
+    mapping["direct_placement"] = direct
+    experiment = dict(experiment) | {"mapping": mapping}
 
     raw_topologies = _array(
         experiment.get("topologies"), "experiment topologies"
@@ -257,25 +252,20 @@ def load_experiment_context(
         _text(_mapping(item, "topology").get("id"), "topology id")
         for item in raw_topologies
     )
-    if len(set(topology_ids)) != len(topology_ids):
-        _fail("reference topology ids must be unique")
-    expected_topology_ids = tuple(
-        identifier
-        for identifier in SUPPORTED_TOPOLOGY_IDS
-        if identifier in topology_ids
-    )
-    if (
-        topology_ids != expected_topology_ids
-        or not set(CORE_TOPOLOGY_IDS).issubset(topology_ids)
-    ):
-        _fail(
-            "reference topology rows must contain the core rows in canonical "
-            "order and may additionally contain 8h0f-cxl-ssd: "
-            + ", ".join(SUPPORTED_TOPOLOGY_IDS)
-        )
+    if not topology_ids or len(set(topology_ids)) != len(topology_ids):
+        _fail("experiment topology ids must be non-empty and unique")
+    slots = _mapping(experiment.get("physical_slots"), "physical slots")
+    slot_count = _integer(slots.get("slot_count"), "physical slot count", minimum=1)
     topologies: list[TopologyPlan] = []
     for index, raw_value in enumerate(raw_topologies):
-        raw = _mapping(raw_value, f"topology {index}")
+        raw = dict(_mapping(raw_value, f"topology {index}"))
+        if "mapping" in raw:
+            overrides = dict(_mapping(raw["mapping"], "topology mapping"))
+            placement = dict(_mapping(overrides.get("direct_placement", {}), "topology direct placement"))
+            if "profile" in placement:
+                placement["profile"] = str(_root_path(placement["profile"], "training profile", experiment_path.parent))
+                overrides["direct_placement"] = placement
+            raw["mapping"] = overrides
         config_paths = tuple(
             _root_path(value, f"topology {raw['id']} system config", experiment_path.parent)
             for value in _array(
@@ -284,6 +274,10 @@ def load_experiment_context(
             )
         )
         config = ResolvedSystemConfig.load(config_paths)
+        if raw.get("integration_mode") == "peer_hbm_hbf":
+            if simulator_path is None:
+                _fail("peer KV preflight requires a simulator to resolve usable HBF capacity and reserves")
+            config = config.resolve(simulator_path)
         external_value = raw.get("external_kind")
         external_kind = (
             None
@@ -347,8 +341,10 @@ def load_experiment_context(
             expected_outcome_reason=expected_outcome_reason,
             capacity_oom_validation=None,
         )
-        if plan.hbm_stacks + plan.hbf_stacks != 8:
-            _fail(f"topology {plan.id} does not occupy eight fixed slots")
+        if plan.hbm_stacks + plan.hbf_stacks != slot_count:
+            _fail(f"topology {plan.id} does not occupy the declared fixed slots")
+        if plan.hbm_stacks and config.integer("hbm-stacks") != plan.hbm_stacks:
+            _fail(f"topology {plan.id} HBM stack count differs from its device configuration")
         if plan.integration_mode == "hbm_fronted_external":
             identity = config.external_backing_identity
             if (
@@ -359,8 +355,7 @@ def load_experiment_context(
                 _fail(f"topology {plan.id} external backing is inconsistent")
             if plan.external_kind == "cxl-ssd":
                 if (
-                    plan.id != CXL_SSD_TOPOLOGY_ID
-                    or identity.get("device_cache", {}).get("enabled") is not True
+                    identity.get("device_cache", {}).get("enabled") is not True
                     or plan.measurement_boundary
                     != CXL_SSD_WRITE_COMPLETION_BOUNDARY
                 ):
@@ -375,19 +370,22 @@ def load_experiment_context(
                 )
         elif plan.integration_mode == "all_hbm_upper_bound":
             if (
-                plan.id != "all-hbm"
-                or plan.hbf_stacks
+                plan.hbf_stacks
                 or config.hbm_capacity_bytes < layout.address_space_bytes
             ):
                 _fail("all-HBM upper bound cannot contain the fixed footprint")
-        elif plan.integration_mode == "direct_hbm_hbf":
+        elif plan.integration_mode == "direct_hbm_hbf" and plan.hbf_stacks == 0:
+            if not plan.hbm_stacks or plan.external_kind is not None:
+                _fail(f"topology {plan.id} direct HBM-only selection is inconsistent")
+        elif plan.integration_mode in {"direct_hbm_hbf", "hbm_fronted_hbf", "peer_hbm_hbf"}:
             if (
                 not plan.hbf_stacks
                 or config.hbf_geometry.stacks != plan.hbf_stacks
-                or config.hbf_mapping_mode != "cached"
+                or plan.external_kind is not None
+                or (plan.integration_mode in {"hbm_fronted_hbf", "peer_hbm_hbf"} and not plan.hbm_stacks)
             ):
                 _fail(
-                    f"topology {plan.id} HBF geometry or reference mapping mode "
+                    f"topology {plan.id} HBF geometry or backing selection "
                     "is inconsistent"
                 )
             thermal = config.hbf_thermal_identity
@@ -406,21 +404,29 @@ def load_experiment_context(
             _fail(f"topology {plan.id} has unsupported integration mode")
         if (
             plan.expected_outcome == "capacity_oom"
-            and plan.integration_mode != "direct_hbm_hbf"
+            and plan.integration_mode not in {"direct_hbm_hbf", "hbm_fronted_hbf", "peer_hbm_hbf"}
         ):
             _fail(
                 f"topology {plan.id} may declare expected_outcome=capacity_oom only "
-                "for direct HBM/HBF initial placement"
+                "for HBM/HBF initial placement"
             )
         # Constructor validation is the authoritative mapping/capacity check.
         try:
-            new_remapper(
-                plan, context_layout=layout, experiment=experiment
+            mapper = new_remapper(
+                plan, context_layout=layout, experiment=experiment, trace_sha256=trace.digest,
+                logical_trace_sha256=canonical_sha256([phase.trace_group.digest for phase in trace.phases]),
             )
+            if isinstance(mapper, PeerKvMigrationRemapper):
+                mapper.preflight(phase.trace_group for phase in trace.phases)
         except RemapError as error:
             if plan.expected_outcome != "capacity_oom":
                 raise
             failure_kind = DIRECT_CAPACITY_OOM_FAILURES.get(str(error))
+            if isinstance(error, PeerCapacityError) and error.code in {
+                "hbm_no_kv_slot", "hbf_static_image_capacity_exceeded",
+                "static_kv_hbm_capacity_exceeded", "peer_total_kv_capacity_exceeded",
+            }:
+                failure_kind = error.code
             if failure_kind is None:
                 # A declaration never blesses an arbitrary remapper failure.
                 raise
@@ -429,7 +435,7 @@ def load_experiment_context(
                 capacity_oom_validation={
                     "declared": True,
                     "validated": True,
-                    "stage": EXPECTED_CAPACITY_OOM_STAGE,
+                    "stage": "empty_to_grown_KV_allocation" if isinstance(error, PeerCapacityError) else EXPECTED_CAPACITY_OOM_STAGE,
                     "failure_kind": failure_kind,
                     "failure_message": str(error),
                     "reason": plan.expected_outcome_reason,
@@ -457,10 +463,37 @@ def new_remapper(
     *,
     context_layout: Any,
     experiment: Mapping[str, Any],
-) -> DirectAttachedRemapper | HbmFrontedBackingRemapper:
-    mapping = _mapping(experiment.get("mapping"), "experiment mapping")
+    trace_sha256: str = "",
+    logical_trace_sha256: str | None = None,
+) -> DirectAttachedRemapper | HbmFrontedBackingRemapper | PeerKvMigrationRemapper:
+    mapping = dict(_mapping(experiment.get("mapping"), "experiment mapping"))
+    mapping.update(_mapping(topology.raw.get("mapping", {}), "topology mapping overrides"))
+    if topology.integration_mode == "peer_hbm_hbf":
+        if _mapping(experiment.get("workload"), "workload").get("window_shape") != "prefill_growth":
+            _fail("peer KV requires an empty-to-grown prefill window, not preinstalled decode KV")
+        peer = _mapping(mapping.get("peer_kv"), "peer KV policy")
+        region = context_layout.region(context_layout.kv_region_id)
+        capacity = topology.system_config.logical_hbf_capacity_bytes
+        if capacity is None:
+            _fail("peer KV requires native resolved HBF logical capacity")
+        return PeerKvMigrationRemapper(
+            address_space_bytes=context_layout.address_space_bytes,
+            hbm_capacity_bytes=topology.system_config.hbm_capacity_bytes,
+            migration_granularity_bytes=_integer(peer.get("migration_granularity_bytes"), "peer KV granularity", minimum=4096),
+            transfer_chunk_bytes=_integer(peer.get("transfer_chunk_bytes"), "peer transfer chunk", minimum=4096),
+            hbf_geometry=topology.system_config.hbf_geometry,
+            hbf_logical_capacity_bytes=capacity,
+            kv_range=(region.begin, region.end), hbm_stacks=topology.hbm_stacks,
+            hbf_stacks=topology.hbf_stacks, policy=_text(peer.get("policy"), "peer KV policy"),
+            hbf_mapping_mode=topology.system_config.values["hbf-mapping-mode"],
+        )
     if topology.integration_mode in {"all_hbm_upper_bound", "direct_hbm_hbf"}:
-        return DirectAttachedRemapper(
+        granularity = _integer(mapping.get("placement_granularity_bytes"), "direct placement granularity", minimum=4096)
+        order, detail = placement_order(
+            context_layout, mapping.get("direct_placement", {}), granularity, trace_sha256,
+            logical_trace_sha256=logical_trace_sha256,
+        )
+        remapper = DirectAttachedRemapper(
             address_space_bytes=context_layout.address_space_bytes,
             hbm_capacity_bytes=(
                 topology.system_config.hbm_capacity_bytes
@@ -470,37 +503,46 @@ def new_remapper(
             hbf_geometry=topology.system_config.hbf_geometry,
             hbm_stacks=topology.hbm_stacks,
             hbf_stacks=topology.hbf_stacks,
-            placement_granularity_bytes=_integer(
-                mapping.get("placement_granularity_bytes"),
-                "direct placement granularity",
-                minimum=4096,
-            ),
+            placement_granularity_bytes=granularity,
+            hbm_priority_units=order,
         )
-    external_policy = _mapping(
-        mapping.get("external_offload"), "external offload policy"
+        if order is not None:
+            remapper.policy_name = "static_" + str(mapping["direct_placement"]["policy"])
+            remapper.policy_detail = detail
+        return remapper
+    hbf_backing = topology.integration_mode == "hbm_fronted_hbf"
+    cache_policy = _mapping(
+        mapping.get("hbf_tiering" if hbf_backing else "external_offload"), "HBM-fronted cache policy"
     )
-    identity = topology.system_config.external_backing_identity
+    policy = _text(cache_policy.get("policy", "address_only_lru"), "HBM-fronted policy")
+    backing = {"backing_kind": "hbf", "hbf_geometry": topology.system_config.hbf_geometry}
+    if not hbf_backing:
+        identity = topology.system_config.external_backing_identity
+        backing = {"backing_kind": "external", "external_capacity_bytes": int(identity["capacity_bytes"]),
+                   "external_page_size_bytes": int(identity["page_size_bytes"])}
     return HbmFrontedBackingRemapper(
         address_space_bytes=context_layout.address_space_bytes,
         hbm_capacity_bytes=topology.system_config.hbm_capacity_bytes,
         migration_granularity_bytes=_integer(
-            external_policy.get("migration_granularity_bytes"),
+            cache_policy.get("migration_granularity_bytes"),
             "external migration granularity",
             minimum=4096,
         ),
         transfer_chunk_bytes=_integer(
-            external_policy.get("transfer_chunk_bytes"),
+            cache_policy.get("transfer_chunk_bytes"),
             "external transfer chunk",
             minimum=4096,
         ),
         read_ahead_window_bytes=_integer(
-            external_policy.get("read_ahead_window_bytes"),
+            cache_policy.get("read_ahead_window_bytes"),
             "external read-ahead window",
             minimum=4096,
         ),
-        backing_kind="external",
-        external_capacity_bytes=int(identity["capacity_bytes"]),
-        external_page_size_bytes=int(identity["page_size_bytes"]),
+        reserved_hbm_bytes=_integer(cache_policy.get("reserved_hbm_bytes", 0), "reserved HBM bytes"),
+        policy=policy,
+        kv_priority_ranges=(tuple((region.begin, region.end) for region in context_layout.regions
+                                  if region.placement_class == "kv") if policy == "class_aware" else None),
+        **backing,
     )
 
 
@@ -514,6 +556,8 @@ def _topology_preflight(
             topology,
             context_layout=context.layout,
             experiment=context.experiment,
+            trace_sha256=context.trace.digest,
+            logical_trace_sha256=canonical_sha256([phase.trace_group.digest for phase in context.trace.phases]),
         )
     )
     slots = _mapping(
@@ -539,12 +583,20 @@ def _topology_preflight(
             "hbf_payload_bytes": remapper.hbf_resident_payload_bytes,
             "external_backing_bytes": 0,
         }
+    elif isinstance(remapper, PeerKvMigrationRemapper):
+        placement = remapper.preflight(phase.trace_group for phase in context.trace.phases)
+        placement.update(kind="exclusive_peer_KV_born_on_write", hbm_payload_bytes=0,
+                         hbf_payload_bytes=remapper.static_flash_bytes, external_backing_bytes=0)
     else:
         placement = {
-            "kind": "complete_external_backing_with_empty_hbm_cache",
-            "hbm_cache_capacity_bytes": remapper.hbm_capacity_bytes,
-            "hbf_payload_bytes": 0,
-            "external_backing_bytes": context.layout.address_space_bytes,
+            "kind": f"complete_{remapper.backing_kind}_backing_with_empty_hbm_cache",
+            "hbm_cache_capacity_bytes": remapper.cache_slots * remapper.granularity,
+            "hbm_stream_staging_bytes": remapper.stream_staging_bytes,
+            "reserved_hbm_bytes": remapper.reserved_hbm_bytes,
+            "hbf_payload_bytes": context.layout.address_space_bytes if remapper.backing_kind == "hbf" else 0,
+            "external_backing_bytes": context.layout.address_space_bytes if remapper.backing_kind == "external" else 0,
+            "policy": remapper.policy,
+            "capacity_semantics": "inclusive_backing_plus_duplicate_HBM_cache_not_additive",
         }
     return {
         "id": topology.id,
@@ -553,7 +605,7 @@ def _topology_preflight(
         "integration_mode": topology.integration_mode,
         "role": (
             "timing_upper_bound"
-            if topology.id == "all-hbm"
+            if topology.integration_mode == "all_hbm_upper_bound"
             else "no_hbf_baseline"
             if topology.hbf_stacks == 0
             else "hbf_topology_candidate"
@@ -606,7 +658,8 @@ def _topology_preflight(
                     topology.system_config.hbf_ctrl_dram_bytes
                     // topology.hbf_stacks
                 ),
-                "budget_basis": "one_over_1000_of_raw_HBF_capacity",
+                "budget_basis": "resolved_device_configuration",
+                "fraction_of_raw_capacity": topology.system_config.hbf_ctrl_dram_bytes / topology.system_config.hbf_geometry.capacity_bytes,
                 "charges": [
                     "mapping_page_directory",
                     "data_write_buffer",
@@ -645,11 +698,9 @@ def _thermal_boundary_axis_preflight(
         thermal_contract.get("boundary_temperature_axis"),
         "thermal boundary-temperature axis",
     )
-    base = next(
-        topology
-        for topology in context.topologies
-        if topology.integration_mode == "direct_hbm_hbf"
-    )
+    base = next((topology for topology in context.topologies if topology.hbf_stacks), None)
+    if base is None:
+        return {"mechanism": axis.get("mechanism"), "validated_against_topology": None, "points": []}
     points: list[dict[str, Any]] = []
     for index, raw_point in enumerate(
         _array(axis.get("points"), "boundary axis points")
@@ -737,7 +788,7 @@ def _preflight_from_context(context: ExperimentContext) -> dict[str, Any]:
             "kv_storage_order": "layer_major",
             "window_shape": context.trace.window_shape,
             "inference_KV_writes_present": True,
-            "all_hbm_is_capacity_relaxed_upper_bound": True,
+            "all_hbm_is_capacity_relaxed_upper_bound": any(topology.integration_mode == "all_hbm_upper_bound" for topology in context.topologies),
             "no_hbf_baselines": [
                 topology.id
                 for topology in context.topologies
@@ -746,12 +797,13 @@ def _preflight_from_context(context: ExperimentContext) -> dict[str, Any]:
             "cached_cxl_ssd_write_completion_boundary": (
                 "device_internal_dram_acceptance_with_nand_destage_excluded"
                 if any(
-                    topology.id == CXL_SSD_TOPOLOGY_ID
+                    topology.external_kind == "cxl-ssd"
                     for topology in context.topologies
                 )
                 else None
             ),
-            "reference_hbf_mapping_mode": "bounded_cached",
+            "hbf_mapping_modes": {topology.id: topology.system_config.hbf_mapping_mode
+                                  for topology in context.topologies if topology.hbf_stacks},
             "hbf_thermal_model": (
                 "core_per_stack_lumped_RC_with_firmware_pacing"
             ),
@@ -767,9 +819,11 @@ def _preflight_from_context(context: ExperimentContext) -> dict[str, Any]:
 
 def build_preflight(
     experiment_path: Path = DEFAULT_EXPERIMENT,
+    *,
+    simulator_path: Path | None = None,
 ) -> dict[str, Any]:
     return _preflight_from_context(
-        load_experiment_context(experiment_path)
+        load_experiment_context(experiment_path, simulator_path=simulator_path)
     )
 
 
@@ -788,6 +842,8 @@ def execute_topology(
         topology,
         context_layout=context.layout,
         experiment=context.experiment,
+        trace_sha256=context.trace.digest,
+        logical_trace_sha256=canonical_sha256([phase.trace_group.digest for phase in context.trace.phases]),
     )
     session = SimulationSession(
         simulator_path=simulator_path,
@@ -1033,7 +1089,7 @@ def run_reference_experiment(
     simulator_path: Path = DEFAULT_SIMULATOR,
     topology_ids: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    context = load_experiment_context(experiment_path)
+    context = load_experiment_context(experiment_path, simulator_path=simulator_path)
     # The experiment config always declares the complete reference topology
     # set (that contract is unchanged); topology_ids only scopes which rows
     # this invocation executes, so bounds or single rows can run as their
@@ -1112,12 +1168,10 @@ def run_reference_experiment(
         "topology_comparison": {
                 "schema": TOPOLOGY_VIEW_SCHEMA,
                 "result": "pass",
-                "varied_variable": "complete_topology",
+                "varied_variable": "declared_topology_and_mapping_configuration",
                 "held_fixed": [
                     "population",
                     "logical_trace",
-                    "initial_state",
-                    "reference_mapping_policy",
                     "completion_boundary",
                 ],
                 "comparison_table": build_topology_table(rows),
@@ -1145,7 +1199,7 @@ def run_reference_experiment(
                 "SLC_one_physical_4KiB_page_per_program;_no_MLC_TLC_QLC"
             ),
             "reference_HBF_mapping_policy": (
-                "bounded_cached_L2P_is_held_fixed_across_topologies"
+                "mapping_mode_and_controller_budget_are_reported_per_topology"
             ),
             "hbf_thermal_boundary": (
                 "core_lumped_RC_pacing_governor;_HBF_rows_enter_at_the_"

@@ -14,6 +14,7 @@ commands:
   run       run closed-loop requests or matched fixed memory windows
   model     convert a catalog descriptor into hbserve.model JSON
   generate  generate a deterministic Poisson/lognormal request trace
+  profile   profile an independent training memory window for static placement
   capabilities
             print the machine-readable fidelity boundary
 
@@ -44,6 +45,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from hbserve.generate import main as generate_main
 
         return generate_main(rest)
+    if command == "profile":
+        from hbserve.windows.placement import main as profile_main
+
+        return profile_main(rest)
     if command == "capabilities":
         if rest:
             print("hbserve capabilities takes no options", file=sys.stderr)

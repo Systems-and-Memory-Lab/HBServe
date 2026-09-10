@@ -13,6 +13,7 @@ selects a matched fixed memory window, without request scheduling or compute.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import hashlib
 from pathlib import Path
 import sys
@@ -486,6 +487,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--efficiency", type=float, help=f"default: {DEFAULT_EFFICIENCY}"
     )
     serving.add_argument("--prefetch-depth", type=int, help="default: 1")
+    serving.add_argument("--prefix-cache-bytes", type=int, help="bounded full-block prefix cache in the shared HBM KV pool")
+    serving.add_argument("--prefix-cache-ttl-ns", type=float, help="optional prefix entry lifetime from publication; requires a nonzero cache budget")
     window = parser.add_argument_group("fixed-window experiments only")
     window.add_argument(
         "--topologies",
@@ -518,6 +521,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "router",
         "placement",
         "run_config",
+        "prefix_cache_bytes",
+        "prefix_cache_ttl_ns",
         *timing_defaults,
     )
     if args.experiment is not None:
@@ -580,6 +585,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 load_json_object(placement_path, "serving placement")
             )
             placement_label = str(placement_path)
+        if args.prefix_cache_bytes is not None or args.prefix_cache_ttl_ns is not None:
+            placement_spec = replace(
+                placement_spec,
+                prefix_cache_bytes=(placement_spec.prefix_cache_bytes if args.prefix_cache_bytes is None else args.prefix_cache_bytes),
+                prefix_cache_ttl_ns=(placement_spec.prefix_cache_ttl_ns if args.prefix_cache_ttl_ns is None else args.prefix_cache_ttl_ns),
+            )
         if args.run_config is not None:
             run_config = load_json_object(args.run_config, "serving run config")
         else:

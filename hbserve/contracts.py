@@ -753,10 +753,13 @@ class RequestSpec:
     prompt_tokens: int
     output_tokens: int
     token_ids: tuple[int, ...] | None = None
+    cache_salt: str = ""
 
     def __post_init__(self) -> None:
         _entity_identifier(self.request_id, "request id")
         _entity_identifier(self.model_id, "request model id")
+        if not isinstance(self.cache_salt, str):
+            raise HBServeError("request cache_salt must be a string")
         _finite(self.arrival_ns, f"request {self.request_id} arrival_ns")
         _integer(
             self.prompt_tokens,
@@ -796,6 +799,7 @@ class RequestSpec:
             "prompt_tokens": self.prompt_tokens,
             "output_tokens": self.output_tokens,
             "token_ids": None if self.token_ids is None else list(self.token_ids),
+            "cache_salt": self.cache_salt,
         }
 
 

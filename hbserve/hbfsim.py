@@ -6,13 +6,14 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from hbfsim_client.simulation_session import (
     SimulationSession,
     SimulationSessionError,
     ResolvedSystemConfig,
 )
+from hbfsim_client.transaction_protocol import TransactionBatch
 from hbserve.contracts import (
     BatchSlice,
     CanonicalServingBatch,
@@ -32,8 +33,16 @@ class HbfSimExecutor:
         simulator_path: Path,
         system_config_paths: Sequence[Path],
         placement: HBServePlacement,
+        initial_hbf_persistent_image: Path | None = None,
+        preinstall_hbf_weights: bool = True,
+        enable_external_recovery: bool = False,
+        on_batch_completed: Callable[
+            [CanonicalServingBatch, TransactionBatch, Mapping[str, Any]], None
+        ] | None = None,
     ) -> None:
         self.placement = placement
+        self._on_batch_completed = on_batch_completed
+        external_enabled = placement.enable_external or enable_external_recovery
         try:
             self.system_config = ResolvedSystemConfig.load(system_config_paths).resolve(
                 simulator_path, enable_hbf=placement.enable_hbf
@@ -57,7 +66,7 @@ class HbfSimExecutor:
                 "serving placement HBF capacity exceeds the engine's logical capacity"
             )
         if (
-            placement.enable_external
+            external_enabled
             and placement.spec.external_page_size_bytes
             != int(self.system_config.external_backing_identity["page_size_bytes"])
         ):
@@ -65,7 +74,7 @@ class HbfSimExecutor:
                 "serving placement external page size differs from the config"
             )
         if (
-            placement.enable_external
+            external_enabled
             and placement.spec.external_capacity_bytes
             > int(self.system_config.external_backing_identity["capacity_bytes"])
         ):
@@ -78,12 +87,15 @@ class HbfSimExecutor:
                 system_config=self.system_config,
                 enable_hbm=True,
                 enable_hbf=placement.enable_hbf,
-                enable_external=placement.enable_external,
+                enable_external=external_enabled,
                 hbm_capacity_bytes=placement.spec.hbm_capacity_bytes,
                 initial_hbf_logical_first_lpn=0,
                 initial_hbf_logical_pages=(
                     placement.initial_hbf_logical_pages
+                    if preinstall_hbf_weights and initial_hbf_persistent_image is None
+                    else 0
                 ),
+                initial_hbf_persistent_image=initial_hbf_persistent_image,
             )
         except SimulationSessionError as error:
             raise HBServeError(str(error)) from error
@@ -115,8 +127,8 @@ class HbfSimExecutor:
             "source_setup": source_setup,
         }
 
-    def admit_request(self, request: RequestSpec) -> None:
-        self.placement.admit_request(request)
+    def admit_request(self, request: RequestSpec) -> int:
+        return self.placement.admit_request(request, now_ns=max(self.frontier_ns, request.arrival_ns))
 
     def can_reserve(self, slices: Sequence[BatchSlice]) -> bool:
         return self.placement.can_reserve(slices)
@@ -158,6 +170,13 @@ class HbfSimExecutor:
             raise HBServeError(
                 "HBFSim completion changed the canonical serving digest"
             )
+        self.placement.complete_batch(batch, float(completion["blocking_finish_ns"]))
+        mapped = replace(mapped, receipt={
+            **mapped.receipt,
+            "prefix_cache_after_completion": self.placement._prefix.receipt(),
+        })
+        if self._on_batch_completed is not None:
+            self._on_batch_completed(batch, mapped, completion)
         return BatchExecution(
             batch_id=batch.schedule.batch_id,
             batch_origin_ns=float(completion["batch_origin_ns"]),
@@ -167,6 +186,43 @@ class HbfSimExecutor:
             remap_receipt=mapped.receipt,
             physical_completion=completion,
         )
+
+    def submit_transactions(self, batch: TransactionBatch) -> dict[str, Any]:
+        """Execute explicitly accounted lifecycle transfers on this device."""
+
+        try:
+            return self._session.submit(batch)
+        except SimulationSessionError as error:
+            raise HBServeError(str(error)) from error
+
+    def checkpoint_image(
+        self, checkpoint_id: str, image_output: Path
+    ) -> dict[str, Any]:
+        """Drain dirty data/mappings and export the native quiescent image."""
+
+        try:
+            return self._session.checkpoint_image(checkpoint_id, image_output)
+        except SimulationSessionError as error:
+            raise HBServeError(str(error)) from error
+
+    def checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
+        try:
+            return self._session.checkpoint(checkpoint_id)
+        except SimulationSessionError as error:
+            raise HBServeError(str(error)) from error
+
+    def crash(self, crash_id: str) -> dict[str, Any]:
+        """Inject a protocol-command-boundary failure without a final drain."""
+
+        try:
+            return self._session.crash(crash_id)
+        except SimulationSessionError as error:
+            raise HBServeError(str(error)) from error
+        finally:
+            self._closed = True
+
+    def source_receipt(self) -> dict[str, Any]:
+        return self._session.source_receipt()
 
     def close(self) -> None:
         if self._closed:
@@ -183,7 +239,13 @@ class HbfSimExecutor:
                 "serving executor must close before final receipt publication"
             )
         placement = self.placement.receipt()
-        if not all(placement["final_invariants"].values()):
+        required_invariants = (
+            "all_request_kv_released",
+            "kv_hot_allocations_accounted_for",
+            "kv_cold_pool_fully_free",
+            "no_pending_migrations",
+        )
+        if not all(placement["final_invariants"][name] for name in required_invariants):
             raise HBServeError(
                 "serving placement retained request KV state at publication"
             )

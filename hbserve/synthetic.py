@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 import hashlib
 import json
@@ -32,6 +32,9 @@ class SyntheticRequestConfig:
     model_probabilities: Mapping[str, float]
     seed: int
     first_arrival_policy: str = "poisson_gap"
+    shared_prefix_tokens: int = 0
+    shared_prefix_groups: int = 1
+    prefix_reuse_probability: float = 1.0
 
     def __post_init__(self) -> None:
         if (
@@ -91,6 +94,14 @@ class SyntheticRequestConfig:
             raise HBServeError(
                 "first_arrival_policy must be zero or poisson_gap"
             )
+        for name, value, minimum in (("shared_prefix_tokens", self.shared_prefix_tokens, 0),
+                                     ("shared_prefix_groups", self.shared_prefix_groups, 1)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise HBServeError(f"{name} must be an integer >= {minimum}")
+        if (isinstance(self.prefix_reuse_probability, bool)
+                or not isinstance(self.prefix_reuse_probability, (int, float))
+                or not 0 <= self.prefix_reuse_probability <= 1):
+            raise HBServeError("prefix_reuse_probability must be between zero and one")
 
     def canonical(self) -> dict[str, object]:
         return {
@@ -107,6 +118,10 @@ class SyntheticRequestConfig:
             "model_probabilities": dict(sorted(self.model_probabilities.items())),
             "seed": self.seed,
             "first_arrival_policy": self.first_arrival_policy,
+            "shared_prefix_tokens": self.shared_prefix_tokens,
+            "shared_prefix_groups": self.shared_prefix_groups,
+            "prefix_reuse_probability": self.prefix_reuse_probability,
+            "prefix_identity_tokens": "synthetic_eight_symbol_alphabet_not_model_generated_text",
             "arrival_process": (
                 "poisson_exponential_interarrival_rounded_nanoseconds_v1"
             ),
@@ -138,6 +153,8 @@ def generate_requests(config: SyntheticRequestConfig) -> RequestTrace:
     """Generate a reproducible Poisson/lognormal multi-model request trace."""
 
     rng = random.Random(config.seed)
+    prefix_rng = random.Random(config.seed ^ 0x484246)
+    prefixes = {}
     weighted_models = tuple(sorted(config.model_probabilities.items()))
     arrival_ns = 0.0
     requests: list[RequestSpec] = []
@@ -161,6 +178,16 @@ def generate_requests(config: SyntheticRequestConfig) -> RequestTrace:
                 config.output_lognormal_sigma,
             ),
         )
+        if config.shared_prefix_tokens:
+            group = (prefix_rng.randrange(config.shared_prefix_groups)
+                     if prefix_rng.random() < config.prefix_reuse_probability
+                     else config.shared_prefix_groups + index)
+            if group not in prefixes:
+                group_rng = random.Random(f"hbserve-prefix:{config.seed}:{group}")
+                prefixes[group] = tuple(group_rng.randrange(8) for _ in range(config.shared_prefix_tokens))
+            prefix_length = min(config.shared_prefix_tokens, request.prompt_tokens - 1)
+            suffix = tuple(prefix_rng.randrange(8) for _ in range(request.processed_input_tokens - prefix_length))
+            request = replace(request, token_ids=prefixes[group][:prefix_length] + suffix)
         requests.append(request)
     canonical_parameters = config.canonical()
     return RequestTrace(

@@ -230,8 +230,8 @@ class PlacementExecutor:
             "placement": self.placement.frontier_ns_independent_state,
         }
 
-    def admit_request(self, request: RequestSpec) -> None:
-        self.placement.admit_request(request)
+    def admit_request(self, request: RequestSpec) -> int:
+        return self.placement.admit_request(request, now_ns=max(self.frontier_ns, request.arrival_ns))
 
     def can_reserve(self, slices: Sequence[BatchSlice]) -> bool:
         return self.placement.can_reserve(slices)
@@ -250,6 +250,7 @@ class PlacementExecutor:
         mapped = self.placement.map_batch(batch, session_frontier_ns=origin)
         self.mapped.append(mapped)
         self._frontier = max(origin, batch.schedule.not_before_ns) + self.latency_ns
+        self.placement.complete_batch(batch, self._frontier)
         return BatchExecution(
             batch_id=batch.schedule.batch_id,
             batch_origin_ns=origin,

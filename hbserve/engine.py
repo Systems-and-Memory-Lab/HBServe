@@ -82,7 +82,7 @@ class HBServeExecutor(Protocol):
     @property
     def execution_identity(self) -> Mapping[str, Any]: ...
 
-    def admit_request(self, request: RequestSpec) -> None: ...
+    def admit_request(self, request: RequestSpec) -> int: ...
 
     def can_reserve(self, slices: Sequence[BatchSlice]) -> bool: ...
 
@@ -109,6 +109,7 @@ class _RequestState:
     first_token_ns: float | None = None
     completion_ns: float | None = None
     preemptions: int = 0
+    prefix_hit_tokens: int = 0
 
     def __post_init__(self) -> None:
         self.prefill_target = self.request.prompt_tokens
@@ -261,14 +262,18 @@ class HBServeEngine:
                 continue
             if budget_tokens == 0 or len(selected) >= budget_requests:
                 break
+            if not state.admitted:
+                cached_tokens = self.executor.admit_request(state.request)
+                if isinstance(cached_tokens, bool) or not isinstance(cached_tokens, int) or not 0 <= cached_tokens < state.request.prompt_tokens:
+                    raise HBServeError("executor returned an invalid cached prefix length")
+                state.processed = cached_tokens
+                state.prefix_hit_tokens = cached_tokens
+                state.hot_kv_blocks = cached_tokens > 0
+                state.admitted = True
             batch_slice = self._slice_for(state, budget_tokens)
             selected.append((state, batch_slice))
             budget_tokens -= batch_slice.token_count
 
-        for state, _ in selected:
-            if not state.admitted:
-                self.executor.admit_request(state.request)
-                state.admitted = True
         while True:
             slices = tuple(item for _, item in selected)
             if not slices:
@@ -402,6 +407,7 @@ class HBServeEngine:
                     "first_token_ns": state.first_token_ns,
                     "completion_ns": state.completion_ns,
                     "preemptions": state.preemptions,
+                    "prefix_hit_tokens": state.prefix_hit_tokens,
                     first_key: state.first_token_ns - state.request.arrival_ns,
                     "e2e_ns": state.completion_ns - state.request.arrival_ns,
                     per_token_key: (
@@ -507,6 +513,8 @@ class HBServeEngine:
             "includes_compute": includes_compute,
             "requests": len(request_rows),
             "output_tokens": total_output_tokens,
+            "prefix_hit_tokens": sum(state.prefix_hit_tokens for state in self._states),
+            "prefix_hit_requests": sum(state.prefix_hit_tokens > 0 for state in self._states),
             "iterations": len(self._batch_records),
             "preemptions": len(self._preemptions),
             "first_arrival_ns": first_arrival,
