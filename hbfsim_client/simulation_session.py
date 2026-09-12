@@ -744,7 +744,7 @@ QUIESCENCE_FIELDS = {
     "write_buffer_entries",
     "inflight_buffered_generations",
     "pending_physical_programs",
-    "pending_physical_erases",
+    "pending_block_transitions",
 }
 
 
@@ -952,10 +952,10 @@ class ResolvedSystemConfig:
     @property
     def hbf_mapping_mode(self) -> str:
         mode = self.values.get("hbf-mapping-mode", "full-resident")
-        if mode not in {"full-resident", "cached", "direct"}:
+        if mode not in {"full-resident", "cached", "raw-physical"}:
             raise SimulationSessionError(
                 "resolved HBFSim config hbf-mapping-mode must be "
-                "full-resident, cached, or direct"
+                "full-resident, cached, or raw-physical"
             )
         return mode
 
@@ -1097,7 +1097,7 @@ class ResolvedSystemConfig:
                 * geometry.page_size_bytes
                 * geometry.stacks
             )
-        if self.hbf_mapping_mode == "direct":
+        if self.hbf_mapping_mode == "raw-physical":
             # The exposed address space carries no L2P state; controller
             # DRAM holds only a configured write buffer, and direct mode
             # requires coalescing disabled.
@@ -1127,7 +1127,12 @@ class ResolvedSystemConfig:
                 * geometry.page_size_bytes
                 * geometry.stacks
             )
-        return mapping_bytes + write_buffer_bytes
+        scratch_bytes = (int(self.values.get("hbf-mapping-scratch-pages", "0"))
+                         * (geometry.page_size_bytes + int(self.values.get("hbf-mapping-cache-tag-bytes", "0")))
+                         * geometry.stacks)
+        gc_bytes = (geometry.page_size_bytes * geometry.stacks
+                    if self.boolean("hbf-auto-gc", default=True) else 0)
+        return mapping_bytes + write_buffer_bytes + scratch_bytes + gc_bytes
 
     @property
     def external_backing_identity(self) -> Mapping[str, Any]:
@@ -1243,6 +1248,7 @@ class SimulationSession:
         initial_hbf_logical_pages: int = 0,
         initial_hbf_persistent_image: Path | None = None,
         hbf_physical_heatmap: Path | None = None,
+        hbf_wear_output_prefix: Path | None = None,
         hbf_physical_heatmap_bins: int = 0,
         read_timeout_s: float | None = None,
     ) -> None:
@@ -1362,6 +1368,8 @@ class SimulationSession:
                 "initial HBF persistent image is mutually exclusive with "
                 "static or dense initial placement"
             )
+        if enable_hbf and initial_pages and system_config.hbf_mapping_mode == "raw-physical":
+            raise SimulationSessionError("raw-physical mode cannot install an implicit logical image")
         if enable_hbf and initial_pages:
             geometry = system_config.hbf_geometry
             end_bytes = (first_lpn + initial_pages) * geometry.page_size_bytes
@@ -1385,7 +1393,7 @@ class SimulationSession:
                 * geometry.pages_per_block
             )
             minimum_mapping_pages = (
-                0 if system_config.hbf_mapping_mode == "direct" else
+                0 if system_config.hbf_mapping_mode == "raw-physical" else
                 hbf_dense_mapping_pages(first_lpn, initial_pages, geometry)
             )
             if (
@@ -1450,6 +1458,8 @@ class SimulationSession:
                 "--initial-hbf-persistent-image",
                 str(persistent_artifact["path"]),
             ))
+        if hbf_wear_output_prefix is not None:
+            command.extend(("--hbf-wear-output-prefix", str(Path(hbf_wear_output_prefix).resolve())))
         if hbf_physical_heatmap is not None:
             command.extend((
                 "--hbf-physical-heatmap",
@@ -1517,7 +1527,7 @@ class SimulationSession:
             )
             mapping_pages = (
                 hbf_dense_mapping_pages(first_lpn, initial_pages, geometry)
-                if enable_hbf and system_config.hbf_mapping_mode != "direct"
+                if enable_hbf and system_config.hbf_mapping_mode != "raw-physical"
                 else 0
             )
             expected_initial_image = {
@@ -1569,11 +1579,12 @@ class SimulationSession:
                     )
                     and persistent_ready["raw_capacity_pages"]
                     == raw_capacity_pages
-                    and persistent_ready["raw_pages"]
-                    == (
-                        geometry.planes
-                        * published_blocks
-                        * geometry.pages_per_block
+                    and isinstance(persistent_ready.get("zone_managed"), bool)
+                    and persistent_ready["raw_pages"] <= raw_capacity_pages
+                    and (
+                        persistent_ready["zone_managed"]
+                        or persistent_ready["raw_pages"]
+                        == geometry.planes * published_blocks * geometry.pages_per_block
                     )
                     and persistent_ready.get("encoding")
                     in {"materialized_v2", "compact_v2"}
@@ -1898,16 +1909,7 @@ class SimulationSession:
                 f"traffic for batch {batch.batch_id}"
             )
         read_engine = completion.get("hbf_read_engine")
-        read_engine_fields = (
-            "page_run_requests",
-            "page_run_pages",
-            "page_run_physical_requests",
-            "page_run_static_requests",
-            "page_run_logical_requests",
-            "streaming_read_buffer_bypass_pages",
-            "scalar_read_requests",
-            "scalar_read_pages",
-        )
+        read_engine_fields = ("scalar_read_requests", "scalar_read_pages")
         if not isinstance(read_engine, Mapping) or set(read_engine) != set(
             read_engine_fields
         ):
@@ -1939,20 +1941,8 @@ class SimulationSession:
             // page_size
             for transaction in hbf_reads
         )
-        if (
-            normalized_engine["page_run_requests"]
-            + normalized_engine["scalar_read_requests"]
-            != len(hbf_reads)
-            or normalized_engine["page_run_pages"]
-            + normalized_engine["scalar_read_pages"]
-            != hbf_read_pages
-            or normalized_engine["page_run_physical_requests"]
-            + normalized_engine["page_run_static_requests"]
-            + normalized_engine["page_run_logical_requests"]
-            != normalized_engine["page_run_requests"]
-            or normalized_engine["streaming_read_buffer_bypass_pages"]
-            > hbf_read_pages
-        ):
+        if (normalized_engine["scalar_read_requests"] != len(hbf_reads)
+                or normalized_engine["scalar_read_pages"] != hbf_read_pages):
             raise SimulationSessionError(
                 f"HBFSim read-engine receipt does not conserve HBF "
                 f"reads for batch {batch.batch_id}"
@@ -2088,6 +2078,47 @@ class SimulationSession:
         """Persist pending HBF state and causally continue the same session."""
 
         return self._checkpoint(checkpoint_id, image_output=None)
+
+    @property
+    def hbf_wear_artifacts(self) -> dict[str, str] | None:
+        """Final offline HTML and JSON paths, available after graceful close."""
+        return deepcopy((self._stop_receipt or {}).get("hbf_wear_artifacts"))
+
+    def hbf_zone_command(
+        self, command: str, command_id: str, *, stack: int = 0,
+        channel: int = 0, zone: int = 0, argument: int = 0,
+    ) -> dict[str, Any]:
+        """Issue an OCP host zone operation at a completed IO barrier.
+
+        Commands: INVALIDATE, RESET, REMAP, READ, WRITE. For READ/WRITE,
+        ``zone`` is the packed channel-local byte address and ``argument``
+        is the byte length. REMAP's argument is the other local zone index.
+        RESET automatically selects a colder invalid zone in the same channel.
+        """
+        if self._closed or not self._enable_hbf:
+            raise SimulationSessionError("host zone commands require an active HBF session")
+        if command not in {"INVALIDATE", "RESET", "REMAP", "READ", "WRITE"}:
+            raise SimulationSessionError("unknown host zone command")
+        try:
+            identifier = require_safe_identifier(command_id, "host zone command id")
+        except TransactionProtocolError as error:
+            raise SimulationSessionError(str(error)) from error
+        values = [_nonnegative_integer(value, name) for value, name in
+                  ((stack, "stack"), (channel, "channel"), (zone, "zone/address"), (argument, "argument/bytes"))]
+        assert self._process.stdin is not None
+        self._process.stdin.write(f"ZONE_{command} {identifier} " + " ".join(map(str, values)) + "\n")
+        self._process.stdin.flush()
+        receipt = self._read_response(f"host zone command {identifier}")
+        if (receipt.get("schema") != "hbfsim.hbf_zone_completion.v1" or
+                receipt.get("result") != "pass" or receipt.get("id") != identifier or
+                receipt.get("command") != f"ZONE_{command}"):
+            raise SimulationSessionError("invalid host zone completion")
+        finish = _finite_nonnegative(receipt.get("finish_ns"), "host zone finish")
+        if finish < self._issued_work_frontier_ns:
+            raise SimulationSessionError("host zone completion moved backwards")
+        self._last_finish_ns = finish
+        self._issued_work_frontier_ns = finish
+        return deepcopy(receipt)
 
     def hbf_wear_snapshot(self, snapshot_id: str) -> dict[str, Any]:
         """Read exact per-writable-block P/E counts without changing state."""
