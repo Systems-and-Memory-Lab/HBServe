@@ -233,11 +233,17 @@ def load_experiment_context(
             source.get("artifact"), "inference source artifact", experiment_path.parent
         ))
         workload["inference_source"] = source
-    trace = build_fixed_footprint_trace(
-        layout=layout,
-        population=population,
-        workload=workload,
-    )
+    if workload.get("kind") == "reference_post_cache_memory_window":
+        from hbserve.windows.reference import build_reference_trace
+
+        trace = build_reference_trace(layout=layout, population=population,
+                                      workload=workload, base=experiment_path.parent)
+    else:
+        trace = build_fixed_footprint_trace(
+            layout=layout,
+            population=population,
+            workload=workload,
+        )
     mapping = dict(_mapping(experiment.get("mapping"), "experiment mapping"))
     direct = dict(_mapping(mapping.get("direct_placement", {}), "direct placement"))
     if "profile" in direct:
@@ -259,6 +265,8 @@ def load_experiment_context(
     topologies: list[TopologyPlan] = []
     for index, raw_value in enumerate(raw_topologies):
         raw = dict(_mapping(raw_value, f"topology {index}"))
+        if trace.window_shape == "reference_post_cache" and raw.get("integration_mode") == "peer_hbm_hbf":
+            _fail("reference peer KV migration requires a token/block ownership binding; object-range binding alone is insufficient")
         if "mapping" in raw:
             overrides = dict(_mapping(raw["mapping"], "topology mapping"))
             placement = dict(_mapping(overrides.get("direct_placement", {}), "topology direct placement"))
@@ -784,10 +792,13 @@ def _preflight_from_context(context: ExperimentContext) -> dict[str, Any]:
             ],
             "declared_capacity_oom_is_exactly_validated": True,
             "undeclared_or_non_capacity_remapper_failure_is_fatal": True,
-            "layer_ordered_trace": True,
+            "layer_ordered_trace": context.trace.window_shape != "reference_post_cache",
             "kv_storage_order": "layer_major",
             "window_shape": context.trace.window_shape,
-            "inference_KV_writes_present": True,
+            "inference_KV_writes_present": (
+                context.trace.traffic_by_kind["kv_cache"]["W_bytes"] > 0
+                if context.trace.window_shape == "reference_post_cache" else True
+            ),
             "all_hbm_is_capacity_relaxed_upper_bound": any(topology.integration_mode == "all_hbm_upper_bound" for topology in context.topologies),
             "no_hbf_baselines": [
                 topology.id
@@ -1188,10 +1199,14 @@ def run_reference_experiment(
             ),
             "measurement_start": preflight["trace"]["measurement_window"]["start"],
             "read_locality": (
+                "bound_reference_post_cache_request_order"
+                if context.trace.window_shape == "reference_post_cache" else
                 "sequential_weight_streams_plus_sequential_and_paged_random_"
                 "KV_reads_plus_indexed_metadata_and_embedding_reads"
             ),
             "write_scope": (
+                "bound_reference_post_cache_writes_including_source_runtime_buffers;_no_native_coarse_supplement"
+                if context.trace.window_shape == "reference_post_cache" else
                 "trace_supported_KV_appends_and_block_table_allocation_only;_"
                 "uncalibrated_activation_scratch_traffic_excluded"
             ),

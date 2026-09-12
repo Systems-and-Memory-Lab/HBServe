@@ -1,0 +1,283 @@
+{
+  "schema": {
+    "name": "hbserve.trace_release_sources",
+    "version": 1
+  },
+  "date": "2026-09-12",
+  "upstream_base": "295c5a4",
+  "native_simulator_source_changed": false,
+  "description": "Reference-only subset of the historical release. Simple, _baseline and the private _client are excluded. Per-file changes identify exact-byte input relocation, cache option validation and new native-window/current-client adapters; no generation rule is retuned for publication.",
+  "initial_migration_hbfsim_head": "35c4a70590def3b1713386367e524ea0818c4890",
+  "initial_migration_hbfsim_pristine": false,
+  "files": [
+    {
+      "path": "hbserve/traces/_reference/cache_compact_trace.py",
+      "local_source_snapshot_sha256": "341151b426511b13961c5c55f67aebec021344cae217663ac9d2e5c93112059a",
+      "packaged_sha256": "341151b426511b13961c5c55f67aebec021344cae217663ac9d2e5c93112059a",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/cache_compact_trace.py",
+        "source_sha256": "70e2888392c729bdd054c77a8936f67c5d80df54517ff67ac21c035e52480dcf",
+        "namespaced_sha256": "341151b426511b13961c5c55f67aebec021344cae217663ac9d2e5c93112059a"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/nvbit_raw_to_address_trace.py",
+      "local_source_snapshot_sha256": "2771b63356ef08e5697dfc4e6237bab44b24279c2b4752816e17449289338fa3",
+      "packaged_sha256": "2771b63356ef08e5697dfc4e6237bab44b24279c2b4752816e17449289338fa3",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/nvbit_raw_to_address_trace.py",
+        "source_sha256": "346b5c43b9eefc461e3657e80cf55f0609e02ea793fb9787e22bd6da6484c476",
+        "namespaced_sha256": "2771b63356ef08e5697dfc4e6237bab44b24279c2b4752816e17449289338fa3"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/stream_lazy_trace_plan.py",
+      "local_source_snapshot_sha256": "af65153aa02ed7da523e7aaaa26c5c3f5ef872d7a0de57ab53ba252ecd9cff61",
+      "packaged_sha256": "8ac162eb9ad62030254fbb5cd327185e9fa0e142d17d017c1f53a5b891b14a72",
+      "release_change": "explicit exact-byte artifact-map input resolution; generation semantics unchanged",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/stream_lazy_trace_plan.py",
+        "source_sha256": "9176859c9d3fb85e7971a94ac6083f5b358ee346ec90b5c389652509f9592606",
+        "namespaced_sha256": "af65153aa02ed7da523e7aaaa26c5c3f5ef872d7a0de57ab53ba252ecd9cff61"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/load_store_trace_contract.py",
+      "local_source_snapshot_sha256": "6f7d5bb18dd4074e3d70a52777a18ed18ca806b9c4768d3d212768906f026906",
+      "packaged_sha256": "6f7d5bb18dd4074e3d70a52777a18ed18ca806b9c4768d3d212768906f026906",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/load_store_trace_contract.py",
+        "source_sha256": "6f7d5bb18dd4074e3d70a52777a18ed18ca806b9c4768d3d212768906f026906",
+        "namespaced_sha256": "6f7d5bb18dd4074e3d70a52777a18ed18ca806b9c4768d3d212768906f026906"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/compact_hbfsim_routing.py",
+      "local_source_snapshot_sha256": "d1d084a3c6a8504baf115daafe949747b86d97710e4261ad6cc560647351988c",
+      "packaged_sha256": "d1d084a3c6a8504baf115daafe949747b86d97710e4261ad6cc560647351988c",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/compact_hbfsim_routing.py",
+        "source_sha256": "9dbaf5dba489fff5fce8c5b7410ef281afce2f69f4eb127f0ba9b3bef19ab36c",
+        "namespaced_sha256": "d1d084a3c6a8504baf115daafe949747b86d97710e4261ad6cc560647351988c"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/phase_aware_cta_generator.py",
+      "local_source_snapshot_sha256": "74bc9dbc352dfa41c4c673d37335275b052e3a8a83c5c61fbc61dd2c1fed7570",
+      "packaged_sha256": "ded55f40e4362eee86d1731de81d17d1fcdcea17cb42853b8a77f37084d4ee22",
+      "release_change": "exact-byte artifact-map input resolution; strict descriptor fingerprints and rules unchanged",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/phase_aware_cta_generator.py",
+        "source_sha256": "43c25eb508d880ab54fdad440272cedf07df3f3d8e36d043964599ad1548bcad",
+        "namespaced_sha256": "74bc9dbc352dfa41c4c673d37335275b052e3a8a83c5c61fbc61dd2c1fed7570"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/semantic_embedding_generator.py",
+      "local_source_snapshot_sha256": "bacf07c553f35f8bcb0d94f0936af74bab78d611441e2fbdc784c8e99a9ce1ba",
+      "packaged_sha256": "bacf07c553f35f8bcb0d94f0936af74bab78d611441e2fbdc784c8e99a9ce1ba",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/semantic_embedding_generator.py",
+        "source_sha256": "bacf07c553f35f8bcb0d94f0936af74bab78d611441e2fbdc784c8e99a9ce1ba",
+        "namespaced_sha256": "bacf07c553f35f8bcb0d94f0936af74bab78d611441e2fbdc784c8e99a9ce1ba"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/parameterized_template_common.py",
+      "local_source_snapshot_sha256": "1b5965c4df0caa89f604e3c2448a80cacf51a04414a11f8241047f8a954c23ad",
+      "packaged_sha256": "1b5965c4df0caa89f604e3c2448a80cacf51a04414a11f8241047f8a954c23ad",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/parameterized_template_common.py",
+        "source_sha256": "db65d5fbd9c91157d60009b5fb566a6f8205109b0fcccdcfcba3fd16a2a8596e",
+        "namespaced_sha256": "1b5965c4df0caa89f604e3c2448a80cacf51a04414a11f8241047f8a954c23ad"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/replay_compact_hbfsim.py",
+      "local_source_snapshot_sha256": "2e6821f870b0d3a7a04fad5f972061fad6b49f465f587c4e416339c6d50e2345",
+      "packaged_sha256": "2e6821f870b0d3a7a04fad5f972061fad6b49f465f587c4e416339c6d50e2345",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/replay_compact_hbfsim.py",
+        "source_sha256": "fee2702dfd422f61983085bfbaf5e7f1a62b92dc62e8c1a2f714f255e4838622",
+        "namespaced_sha256": "2e6821f870b0d3a7a04fad5f972061fad6b49f465f587c4e416339c6d50e2345"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/full_model_trace_plan.py",
+      "local_source_snapshot_sha256": "161db75afacaca47b1d958cea9447518fd547693e3cd499bf4f6ab2981360f12",
+      "packaged_sha256": "161db75afacaca47b1d958cea9447518fd547693e3cd499bf4f6ab2981360f12",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/full_model_trace_plan.py",
+        "source_sha256": "e11b5eb62b5523d77c3a87d70b379c6cb63657ad7ef1ef4c79e0a14e1d68e8c8",
+        "namespaced_sha256": "161db75afacaca47b1d958cea9447518fd547693e3cd499bf4f6ab2981360f12"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/summarize_nvbit_addresses.py",
+      "local_source_snapshot_sha256": "6303cdf6a0124cde97120a225d3b3b206cd83881ce54cf3096bcc974547aa9d9",
+      "packaged_sha256": "6303cdf6a0124cde97120a225d3b3b206cd83881ce54cf3096bcc974547aa9d9",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/summarize_nvbit_addresses.py",
+        "source_sha256": "025f11dad98a2a0d21fb10566b956027d3fa2cf033d75eb3eee677ca1df57bfe",
+        "namespaced_sha256": "6303cdf6a0124cde97120a225d3b3b206cd83881ce54cf3096bcc974547aa9d9"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/prepare_full_model_post_cache.py",
+      "local_source_snapshot_sha256": "1bb1e6eb5ba405685000afbebf29aa4de2b801d44ba77cc01320f0191fef772f",
+      "packaged_sha256": "1bb1e6eb5ba405685000afbebf29aa4de2b801d44ba77cc01320f0191fef772f",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/prepare_full_model_post_cache.py",
+        "source_sha256": "7a00b99a34e8b30a77ff6c3dc7024f54d370d9b74f3b96cb9ad1ccebfa63dbad",
+        "namespaced_sha256": "1bb1e6eb5ba405685000afbebf29aa4de2b801d44ba77cc01320f0191fef772f"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/cache_compact_trace_fast.py",
+      "local_source_snapshot_sha256": "4b90ec8461a50c9a78e743e25eccd1256681f6f422e43c04212f737ce7412cdd",
+      "packaged_sha256": "2b2789c18d67b53c9fc588093f5f099c776af4ab3e216efcca361763d50062e8",
+      "release_change": "explicit cache configuration validation and native 64B option plumbing",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/cache_compact_trace_fast.py",
+        "source_sha256": "3ae130d6d50bb6d06e3140314cd9d2b8bceda0708837f01c01552c78b4f86016",
+        "namespaced_sha256": "4b90ec8461a50c9a78e743e25eccd1256681f6f422e43c04212f737ce7412cdd"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/gpu_request_transform.py",
+      "local_source_snapshot_sha256": "a2f0c769d620d5ca0c075cab5eda275da99f88721bc2f90d15173447564e594e",
+      "packaged_sha256": "a2f0c769d620d5ca0c075cab5eda275da99f88721bc2f90d15173447564e594e",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/gpu_request_transform.py",
+        "source_sha256": "4c08390fce8d01629eb28551fbe240d5e3ab2b54c2cf63039c4fe3e71b596aae",
+        "namespaced_sha256": "a2f0c769d620d5ca0c075cab5eda275da99f88721bc2f90d15173447564e594e"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/materialize_order_skeleton_template.py",
+      "local_source_snapshot_sha256": "263015949fe51eae64b9c76b9ae9d651e2374e779b354b39422f1c7516b852ef",
+      "packaged_sha256": "263015949fe51eae64b9c76b9ae9d651e2374e779b354b39422f1c7516b852ef",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/materialize_order_skeleton_template.py",
+        "source_sha256": "c7e27ab9ca5d124dde3334af274cb2cd6114be72a32aef9274eb793521f24aca",
+        "namespaced_sha256": "263015949fe51eae64b9c76b9ae9d651e2374e779b354b39422f1c7516b852ef"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/extract_nvbit_order_skeleton.py",
+      "local_source_snapshot_sha256": "46dada272b2aa4b1a0a7a7d8eae2e13d71960961ce241c14709c80dc6e532653",
+      "packaged_sha256": "46dada272b2aa4b1a0a7a7d8eae2e13d71960961ce241c14709c80dc6e532653",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/extract_nvbit_order_skeleton.py",
+        "source_sha256": "8e233c91309fb0f2ff097da4062e8b35dc6dcfa4c797165432409ae214f82335",
+        "namespaced_sha256": "46dada272b2aa4b1a0a7a7d8eae2e13d71960961ce241c14709c80dc6e532653"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/shape_aware_cta_rules.py",
+      "local_source_snapshot_sha256": "4dcd235e048d3c3f90291686d801158b439039112ba10c818538b4c0419071dd",
+      "packaged_sha256": "4dcd235e048d3c3f90291686d801158b439039112ba10c818538b4c0419071dd",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/shape_aware_cta_rules.py",
+        "source_sha256": "4dcd235e048d3c3f90291686d801158b439039112ba10c818538b4c0419071dd",
+        "namespaced_sha256": "4dcd235e048d3c3f90291686d801158b439039112ba10c818538b4c0419071dd"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/compact_request_template.py",
+      "local_source_snapshot_sha256": "46d952ab23e95a0d9962764130de743c174043bb39bcc32882b8fbc20490cc49",
+      "packaged_sha256": "46d952ab23e95a0d9962764130de743c174043bb39bcc32882b8fbc20490cc49",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/compact_request_template.py",
+        "source_sha256": "46d952ab23e95a0d9962764130de743c174043bb39bcc32882b8fbc20490cc49",
+        "namespaced_sha256": "46d952ab23e95a0d9962764130de743c174043bb39bcc32882b8fbc20490cc49"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/nvbit_v5_trace.py",
+      "local_source_snapshot_sha256": "e6983d6048d66ad8952180fbdfa3612a4ee287c5d5ff5a013738600b916f9371",
+      "packaged_sha256": "e6983d6048d66ad8952180fbdfa3612a4ee287c5d5ff5a013738600b916f9371",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/nvbit_v5_trace.py",
+        "source_sha256": "e6983d6048d66ad8952180fbdfa3612a4ee287c5d5ff5a013738600b916f9371",
+        "namespaced_sha256": "e6983d6048d66ad8952180fbdfa3612a4ee287c5d5ff5a013738600b916f9371"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/analyze_cta_translation.py",
+      "local_source_snapshot_sha256": "32237a8cd61b6bf5408a9e097a84598728455d40c39cb4f23245e95190dcad22",
+      "packaged_sha256": "32237a8cd61b6bf5408a9e097a84598728455d40c39cb4f23245e95190dcad22",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/analyze_cta_translation.py",
+        "source_sha256": "27f0a6b7e4592c0db5523c84902e5cf11f5cf02093e6f68a2ce60f05c14b3d9c",
+        "namespaced_sha256": "32237a8cd61b6bf5408a9e097a84598728455d40c39cb4f23245e95190dcad22"
+      }
+    },
+    {
+      "path": "hbserve/traces/_reference/__init__.py",
+      "local_source_snapshot_sha256": "ef050b1102aa35d003107f406008a219f47ebe662fd1e79038a21fa93ebb92c3",
+      "packaged_sha256": "ef050b1102aa35d003107f406008a219f47ebe662fd1e79038a21fa93ebb92c3",
+      "release_change": "none; identical local snapshot"
+    },
+    {
+      "path": "hbserve/traces/common.py",
+      "local_source_snapshot_sha256": "4931ef85916b5c479b46d6b3dcc7963d5ba710bf9379d0c3b20ae5c534949d55",
+      "packaged_sha256": "6200ed71593e1d0f4526fe9888b8d41d2a457cdebce4aef5255cd4809c98f20b",
+      "release_change": "Reference-only adapter cleanup; not a generation/cache algorithm change",
+      "prior_release_packaged_sha256": "4931ef85916b5c479b46d6b3dcc7963d5ba710bf9379d0c3b20ae5c534949d55"
+    },
+    {
+      "path": "hbserve/traces/reference.py",
+      "local_source_snapshot_sha256": "6f1e7469c31dfc7fccb27313ce6df9ca02b213349724783567e6512b80952eb5",
+      "packaged_sha256": "91ba34f1a2880d9b4a6b92c24c90f4ff4ccb5c919efd5a83f06dc2c7ba70bb5c",
+      "release_change": "explicit cache/64B options and context-scoped source relocation propagated to the producer thread"
+    },
+    {
+      "path": "hbserve/traces/LICENSE.HBFSim",
+      "local_source_snapshot_sha256": "ef719c401c789166de786951fa9805d2505d8144840f633a06e2aaca0a9715e2",
+      "packaged_sha256": "ef719c401c789166de786951fa9805d2505d8144840f633a06e2aaca0a9715e2",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "tmp/HBFSim-latest/LICENSE",
+        "source_sha256": "ef719c401c789166de786951fa9805d2505d8144840f633a06e2aaca0a9715e2",
+        "namespaced_sha256": "ef719c401c789166de786951fa9805d2505d8144840f633a06e2aaca0a9715e2"
+      }
+    },
+    {
+      "path": "native/reference_cache.cpp",
+      "local_source_snapshot_sha256": "e2f80319cfa8a8b6fd1a13dc99758adb50953c8f95ffb08b9843cd5eb7314280",
+      "packaged_sha256": "e2f80319cfa8a8b6fd1a13dc99758adb50953c8f95ffb08b9843cd5eb7314280",
+      "release_change": "none; identical local snapshot",
+      "initial_migration": {
+        "source": "experiments/hbfsim_trace_capture/fast_cache_compact_trace.cpp",
+        "source_sha256": "6b6408f0d53ba879d27a291ace6f93b51b4ebb015dd10a097d30bf3bdf5ea003",
+        "namespaced_sha256": "6b6408f0d53ba879d27a291ace6f93b51b4ebb015dd10a097d30bf3bdf5ea003"
+      }
+    },
+    {
+      "path": "hbserve/traces/replay.py",
+      "packaged_sha256": "56481779f1a2e123bbfa02540f34e1635e3893ec2c066f2013cb0b4d19b9add2",
+      "origin": "HBServe dependency replay adapter added 2026-09-12",
+      "release_change": "Reference-only adapter cleanup; not a generation/cache algorithm change",
+      "prior_release_packaged_sha256": "a799c52534375eb526ba0a37be3180d8b3f939fe18d0e0d428ef1fc82ffabd3c"
+    }
+  ],
+  "source_release_commit": "e42490f9865602df9894f467529ffaf9a7ee2cc2"
+}

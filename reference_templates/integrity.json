@@ -1,0 +1,13 @@
+{
+  "artifacts": 419,
+  "complete_input_closures": 1,
+  "compressed_bytes": 77502282,
+  "hardware_fidelity_validated": false,
+  "model_expanded": false,
+  "packaged_template_bodies": 95,
+  "recipes": 42,
+  "status": "PASS_PACKAGED_SOURCE_INTEGRITY_NOT_FIDELITY",
+  "templates": 159,
+  "uncompressed_bytes": 657589193,
+  "unique_blobs": 371
+}

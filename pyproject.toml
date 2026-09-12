@@ -19,6 +19,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+reference = ["numpy>=1.23"]
+
 [project.scripts]
 hbserve = "hbserve.__main__:main"
 
@@ -29,3 +32,6 @@ Issues = "https://github.com/Systems-and-Memory-Lab/HBServe/issues"
 [tool.setuptools.packages.find]
 include = ["hbserve*", "hbfsim_client*"]
 exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+"hbserve.traces" = ["SOURCES.json", "LICENSE.HBFSim"]

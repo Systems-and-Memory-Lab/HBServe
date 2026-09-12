@@ -1,0 +1,13 @@
+{
+  "capacity_bytes": 41943040,
+  "line_bytes": 128,
+  "sector_bytes": 32,
+  "associativity": 16,
+  "write_policy": "write-back",
+  "write_allocate": true,
+  "write_miss_fetch": true,
+  "final_drain": true,
+  "read_fill_bytes": 64,
+  "writeback_bytes": 64,
+  "read_fill_object_boundary": "reject"
+}

@@ -1,0 +1,7 @@
+include native/reference_cache.cpp
+recursive-include configs *.cfg *.json
+recursive-include models *.json
+recursive-include examples *.py *.json
+recursive-include docs *.md
+recursive-include tests *.py
+recursive-include reference_templates *.json *.gz *.md

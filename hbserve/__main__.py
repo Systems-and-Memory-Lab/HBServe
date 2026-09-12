@@ -15,6 +15,7 @@ commands:
   model     convert a catalog descriptor into hbserve.model JSON
   generate  generate a deterministic Poisson/lognormal request trace
   profile   profile an independent training memory window for static placement
+  trace     generate or inspect a capture-bound detailed reference
   capabilities
             print the machine-readable fidelity boundary
 
@@ -33,6 +34,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(__version__)
         return 0
     command, rest = arguments[0], arguments[1:]
+    if command == "trace":
+        from hbserve.traces.__main__ import main as trace_main
+
+        return trace_main(rest)
     if command == "run":
         from hbserve.run import main as run_main
 

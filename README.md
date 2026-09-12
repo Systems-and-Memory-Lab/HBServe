@@ -36,6 +36,26 @@ not claim kernel-level cache behavior or hardware-calibrated end-to-end latency
 unless those are supplied and validated by a future trace/calibration backend.
 Run `hbserve capabilities` to inspect the exact current boundary.
 
+## Optional detailed reference
+
+Current native coarse execution remains the default. This feature branch adds
+capture-bound `hbserve trace reference` generation and a reference traffic
+provider for the same `hbserve run --experiment` / `load_experiment_context`
+interface. It reuses native placement, session execution and result accounting.
+Historical `simple` is retained on its archive branch, not included here.
+Start with [Reference preparation](docs/reference-preparation.md) for the
+self-contained example, input-binding tools, dependencies and support limits.
+See [Reference through the native interface](docs/reference-native.md) for
+exact inputs, object bindings, unchanged default commands and current limits.
+This is not arbitrary-model coverage, a dynamic-serving backend or a fast
+coarse timing estimator. The [template catalog](reference_templates/README.md)
+includes retained source bodies, existing plans and explicit availability
+records. New workloads still require qualified inputs, not just a model name.
+
+The bundled client/system profiles target current HBFSim, so default hardware
+assumptions differ from the older branch. Unchanged commands do **not** imply
+unchanged historical timings; see [compatibility](docs/reference-native.md#simulator-compatibility).
+
 ## Install
 
 HBServe requires Python 3.10 or newer and has no runtime Python dependencies.

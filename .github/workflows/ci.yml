@@ -24,3 +24,13 @@ jobs:
       - run: hbserve capabilities
       - run: python -B tests/test_hbserve.py
       - run: python -B tests/test_windows.py
+      - run: python -B tests/test_recovery.py
+      - run: python -B -m unittest discover -s tests -p 'test_trace_*.py'
+      - run: hbserve trace catalog verify --catalog reference_templates/catalog.json
+      - run: python -m pip install build
+      - run: python -m build
+      - run: python tests/check_trace_distribution.py --sdist dist/*.tar.gz --wheel dist/*.whl
+      - run: python -m venv .venv
+      - run: .venv/bin/python -m pip install --no-deps dist/*.whl
+      - run: .venv/bin/python -I -B tests/smoke_trace_install.py
+      - run: .venv/bin/python -I -B examples/reference_catalog_smoke.py --output-root out/installed-retained-cta
